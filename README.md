@@ -87,12 +87,11 @@ This keeps the customer support widget from inheriting the broader CLI tool surf
 
 ## Install
 
-This plugin currently lives on the `codex/new-api-support-plugin` branch of the existing `hexonal/new-api` repository.
 Install it on the Hermes server with:
 
 ```bash
 rm -rf /root/.hermes/plugins/new-api
-git clone --depth 1 --branch codex/new-api-support-plugin git@github.com:hexonal/new-api.git /root/.hermes/plugins/new-api
+git clone --depth 1 git@github.com:hexonal/new-api-support-plugin.git /root/.hermes/plugins/new-api
 hermes plugins enable new-api
 systemctl restart hermes-gateway
 ```
@@ -101,7 +100,7 @@ For updates:
 
 ```bash
 cd /root/.hermes/plugins/new-api
-git fetch origin codex/new-api-support-plugin
-git reset --hard origin/codex/new-api-support-plugin
+git fetch origin main
+git reset --hard origin/main
 systemctl restart hermes-gateway
 ```
