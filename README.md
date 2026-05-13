@@ -103,10 +103,13 @@ Restrict the support platform toolset in `/root/.hermes/config.yaml`:
 
 ```yaml
 platform_toolsets:
-  new_api_support: [web, memory, no_mcp]
+  new_api_support: [web, no_mcp]
 ```
 
-This keeps the customer support widget from inheriting the broader CLI tool surface.
+This keeps the customer support widget from inheriting the broader CLI tool
+surface and prevents cross-session leakage through long-term memory. Add
+`memory` only if the deployment intentionally wants user-level memory shared
+across separate web support sessions.
 
 ## Install
 
