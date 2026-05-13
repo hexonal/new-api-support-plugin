@@ -35,6 +35,25 @@ DEFAULT_MAX_MESSAGE_CHARS = 4000
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 180
 DEFAULT_REQUIRE_USER_ID = True
 USER_ID_FIELDS = ("user_id", "visitor_id", "anonymous_id", "client_id")
+SUPPORT_CHANNEL_PROMPT = """\
+This chat comes from a website support widget.
+
+Boundary rules:
+- Do not inherit identity, brand, tone, or private nicknames from other platforms, chats, memories, or skills.
+- Do not claim to be a Feishu bot, WeChat bot, personal assistant, or any unrelated service identity.
+- Do not assign yourself a brand identity unless the user or deployment-specific skill/config explicitly provides one.
+- Use neutral, concise, directly actionable technical-support language.
+- Do not expose internal tokens, credentials, server paths, or private configuration.
+
+Support workflow:
+- For API failures, ask for the minimum useful evidence: curl, request_id, task_id, model, endpoint, timestamp, and the exact error body.
+- Do not invent backend query results. If evidence is missing, ask for it before claiming a root cause.
+- For billing, routing, quota, token, or permission issues, separate confirmed facts from the next diagnostic step.
+"""
+FORBIDDEN_REPLY_PATTERNS = (
+    (re.compile(r"\b(?:Feishu|Lark|WeChat|Weixin)\s+bot\b", re.IGNORECASE), "support agent"),
+    (re.compile(r"\bpersonal assistant\b", re.IGNORECASE), "support agent"),
+)
 
 
 def _truthy(value: Any, default: bool = False) -> bool:
@@ -85,6 +104,36 @@ def _conversation_key(source_name: str, user_id: str, session_id: str) -> str:
     user_part = _sanitize_id(user_id)
     session_part = _sanitize_id(session_id, "session")
     return f"{source_part}:user:{user_part}:session:{session_part}"
+
+
+def _context_lines(context: Any) -> list[str]:
+    if not isinstance(context, dict):
+        return []
+    keys = (
+        "page_url",
+        "path",
+        "title",
+        "user_agent",
+        "client_ip",
+        "referrer",
+        "locale",
+    )
+    lines: list[str] = []
+    for key in keys:
+        value = context.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            lines.append(f"{key}={text[:500]}")
+    return lines
+
+
+def _clean_support_reply(reply: Any) -> str:
+    text = str(reply or "")
+    for pattern, replacement in FORBIDDEN_REPLY_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text.strip()
 
 
 def check_new_api_support_requirements() -> bool:
@@ -283,7 +332,7 @@ class NewAPISupportAdapter(BasePlatformAdapter):
         return self._json(
             {
                 "session_id": payload["session_id"],
-                "reply": reply or "",
+                "reply": _clean_support_reply(reply),
             }
         )
 
@@ -354,7 +403,21 @@ class NewAPISupportAdapter(BasePlatformAdapter):
             raw_message=payload,
             message_id=message_id,
             auto_skill=self.auto_skill,
+            channel_prompt=self._channel_prompt(payload),
         )
+
+    def _channel_prompt(self, payload: Dict[str, Any]) -> str:
+        lines = [SUPPORT_CHANNEL_PROMPT, "Request context:"]
+        lines.append(f"source={str(payload.get('source') or 'new-api-web').strip()}")
+        lines.append(f"session_id={str(payload.get('session_id') or '').strip()}")
+        user_id = _payload_user_id(payload)
+        if user_id:
+            lines.append(f"user_id={user_id}")
+        role = payload.get("role")
+        if role is not None:
+            lines.append(f"role={role}")
+        lines.extend(_context_lines(payload.get("context")))
+        return "\n".join(lines)
 
     def _check_auth(self, request: Any) -> Optional[Any]:
         if not self.require_token:

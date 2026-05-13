@@ -242,7 +242,9 @@ async def _test_builds_message_event_and_returns_agent_reply(adapter_module):
     assert event.source.chat_id == "new-api-web:user:123:session:web_abc"
     assert event.source.thread_id is None
     assert event.source.user_id == "new-api-web:123"
-    assert event.channel_prompt is None
+    assert "website support widget" in event.channel_prompt
+    assert "Do not inherit identity, brand, tone, or private nicknames" in event.channel_prompt
+    assert "page_url=https://new-api.example.com/contact" in event.channel_prompt
     assert event.raw_message["context"]["page_url"] == "https://new-api.example.com/contact"
 
 
@@ -282,6 +284,38 @@ async def _test_returns_handler_reply_verbatim(adapter_module):
 
 def test_returns_handler_reply_verbatim(adapter_module):
     asyncio.run(_test_returns_handler_reply_verbatim(adapter_module))
+
+
+async def _test_sanitizes_private_assistant_terms(adapter_module):
+    adapter = adapter_module.NewAPISupportAdapter(
+        StubPlatformConfig(extra={"token": "secret", "allowed_sources": ["new-api-web"]})
+    )
+
+    async def handler(_event):
+        return "I am a Feishu bot and personal assistant. Please provide request_id."
+
+    adapter.set_message_handler(handler)
+
+    response = await adapter.handle_chat_request(
+        make_request(
+            adapter_module,
+            {
+                "session_id": "web_abc",
+                "message": "接口 403",
+                "source": "new-api-web",
+                "user_id": "sanitize-user",
+            },
+        )
+    )
+
+    reply = json.loads(response.text)["reply"]
+    assert "Feishu bot" not in reply
+    assert "personal assistant" not in reply
+    assert reply == "I am a support agent and support agent. Please provide request_id."
+
+
+def test_sanitizes_private_assistant_terms(adapter_module):
+    asyncio.run(_test_sanitizes_private_assistant_terms(adapter_module))
 
 
 async def _test_rejects_missing_user_id_by_default(adapter_module):
