@@ -60,6 +60,10 @@ optional_env:
     description: "Maximum time to wait for the agent response."
     prompt: "Request timeout seconds"
     password: false
+  - name: NEW_API_SUPPORT_REQUIRE_USER_ID
+    description: "Require a stable user_id, visitor_id, anonymous_id, or client_id to isolate web sessions. Defaults true."
+    prompt: "Require stable user identity?"
+    password: false
   - name: NEW_API_SUPPORT_SESSION_PREFIX
     description: "Required session_id prefix. Empty disables prefix enforcement."
     prompt: "Session prefix"
