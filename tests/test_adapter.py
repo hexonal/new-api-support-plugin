@@ -404,6 +404,40 @@ def test_task_success_reply_is_reduced_to_customer_safe_summary(adapter_module):
     assert "回调" not in reply
 
 
+def test_task_completion_time_reply_keeps_only_customer_safe_timing(adapter_module):
+    reply = adapter_module._clean_support_reply(
+        (
+            "当前状态：已完成\n"
+            "结论：该任务在海外执行，模型 dreamina，已生成回调。\n"
+            "任务于 2026/05/13 21:28:58.470 开始执行，"
+            "并在 2026/05/13 21:33:18 成功完成，耗时约 4 分 20 秒。"
+            "内部定位来自 SLS logstore 和 /root/.hermes/session。"
+        ),
+        original_message="task_3GTIlQ0WzIx8HPLvIRYIkUBY2fdgQuag 这个任务的时间是什么，耗时多久？",
+        language="zh-CN",
+    )
+
+    assert reply == "该任务已完成。开始时间：2026-05-13 21:28:58；完成时间：2026-05-13 21:33:18；耗时约 4 分 20 秒。"
+    assert "海外" not in reply
+    assert "dreamina" not in reply
+    assert "模型" not in reply
+    assert "回调" not in reply
+    assert "MCP" not in reply
+    assert "SLS" not in reply
+    assert "logstore" not in reply
+    assert "/root" not in reply
+
+
+def test_task_completion_time_reply_uses_same_date_for_finish_time(adapter_module):
+    reply = adapter_module._clean_support_reply(
+        "当前状态：已完成。开始时间：2026/05/13 21:28:58.470，完成时间：21:33:18，耗时约 4分20秒。",
+        original_message="task_3GTIlQ0WzIx8HPLvIRYIkUBY2fdgQuag 什么时候开始完成，耗时多久",
+        language="zh-CN",
+    )
+
+    assert reply == "该任务已完成。开始时间：2026-05-13 21:28:58；完成时间：2026-05-13 21:33:18；耗时约 4 分 20 秒。"
+
+
 async def _test_rejects_missing_user_id_by_default(adapter_module):
     adapter = adapter_module.NewAPISupportAdapter(
         StubPlatformConfig(extra={"token": "secret", "allowed_sources": ["new-api-web"]})

@@ -55,6 +55,7 @@ Boundary rules:
 Support workflow:
 - For API failures, ask for the minimum useful evidence: curl, request_id, task_id, model, endpoint, timestamp, and the exact error body.
 - If the user already provided a task_id, request_id, curl, or exact error text, use available read-only diagnostics before asking for more information. Do not ask the user to repeat that identifier.
+- For task_id status, completion-time, or duration questions, use the New API task diagnostic workflow first; do not start with database, project-list, workspace-list, or guessed-environment lookups.
 - Do not invent backend query results. If diagnostics are unavailable, fail, or evidence is still insufficient, give a customer-safe status and ask only for missing public fields before claiming a root cause.
 - For billing, routing, quota, token, or permission issues, separate confirmed facts from the next diagnostic step.
 """
@@ -91,6 +92,19 @@ INTERNAL_DETAILS_REQUEST_PATTERN = re.compile(
     re.IGNORECASE,
 )
 TRACKING_IDENTIFIER_PATTERN = re.compile(r"\b(?:task|request|req|trace)[_-][A-Za-z0-9][A-Za-z0-9_-]{6,}\b", re.IGNORECASE)
+TIME_DETAIL_REQUEST_PATTERN = re.compile(
+    r"(?:时间|耗时|多久|开始|完成时间|结束时间|什么时候|when|time|duration|how long|started|finished|completed at)",
+    re.IGNORECASE,
+)
+FULL_DATETIME_PATTERN = re.compile(
+    r"\b(?P<date>\d{4}[/-]\d{1,2}[/-]\d{1,2})[ T](?P<time>\d{1,2}:\d{2}:\d{2})(?:\.\d+)?\b"
+)
+TIME_OF_DAY_PATTERN = re.compile(r"\b\d{1,2}:\d{2}:\d{2}\b")
+DURATION_ZH_PATTERN = re.compile(r"(?:耗时|用时|duration)?\s*(?:约|大约|about)?\s*(\d+)\s*分(?:钟)?\s*(\d+)\s*秒", re.IGNORECASE)
+DURATION_EN_PATTERN = re.compile(
+    r"(?:duration|took|used)?\s*(?:about|around|approximately)?\s*(\d+)\s*(?:minutes?|mins?|m)\s*(\d+)\s*(?:seconds?|secs?|s)\b",
+    re.IGNORECASE,
+)
 
 
 def _truthy(value: Any, default: bool = False) -> bool:
@@ -173,9 +187,7 @@ def _clean_support_reply(reply: Any, original_message: Any = None, language: Any
     text = text.strip()
     preferred_language = _preferred_language(language, original_message, text)
     if _contains_tracking_identifier(original_message):
-        if _contains_internal_disclosure(text):
-            return _diagnostic_unavailable_reply(preferred_language)
-        return _safe_tracking_reply(text, preferred_language)
+        return _safe_tracking_reply(text, preferred_language, original_message)
     if _contains_internal_disclosure(text):
         return _internal_details_refusal(preferred_language)
     if _is_language_mismatch(text, preferred_language):
@@ -233,13 +245,26 @@ def _internal_details_refusal(language: str = "zh-CN") -> str:
     return "这些属于内部系统和排障细节，我不能对外提供。"
 
 
-def _safe_tracking_reply(reply: Any, language: str = "zh-CN") -> str:
-    text = str(reply or "").lower()
-    completed = any(word in text for word in ("已完成", "成功完成", "completed", "successfully completed"))
-    failed = any(word in text for word in ("失败", "未成功", "failed", "error"))
-    running = any(word in text for word in ("处理中", "执行中", "排队", "running", "processing", "queued"))
+def _safe_tracking_reply(reply: Any, language: str = "zh-CN", original_message: Any = None) -> str:
+    original_text = str(reply or "")
+    text = original_text.lower()
+    completed = re.search(r"(?:已完成|成功完成|完成了|已经完成|\bcompleted\b|\bsuccessfully completed\b|\bsucceeded\b)", text, re.IGNORECASE) is not None
+    failed = re.search(
+        r"(?:当前状态|任务|task|status).{0,24}(?:失败|未成功|failed|did not complete|not complete)",
+        text,
+        re.IGNORECASE,
+    ) is not None
+    running = re.search(
+        r"(?:当前状态|任务|task|status).{0,24}(?:处理中|执行中|排队|running|processing|queued)",
+        text,
+        re.IGNORECASE,
+    ) is not None
+    wants_timing = _wants_task_timing(original_message)
+    timing = _extract_task_timing(original_text) if wants_timing else {}
     if language == "en":
         if completed:
+            if wants_timing and _has_timing_summary(timing):
+                return _format_timing_reply(timing, language)
             return "This task is complete and the result has been returned. If you still cannot see it, share what you see on the page and any exact error text so I can continue checking."
         if failed:
             return "This task did not complete successfully. Please share what you see on the page and any exact error text so I can continue checking."
@@ -247,12 +272,115 @@ def _safe_tracking_reply(reply: Any, language: str = "zh-CN") -> str:
             return "This task is still being processed. If it has been waiting too long, share what you see on the page and any exact error text so I can continue checking."
         return _diagnostic_unavailable_reply(language)
     if completed:
+        if wants_timing and _has_timing_summary(timing):
+            return _format_timing_reply(timing, language)
         return "该任务已完成，结果已回传。如果您仍然看不到结果，请补充页面显示内容或完整报错内容，我继续帮您定位。"
     if failed:
         return "该任务未成功完成。请补充页面显示内容或完整报错内容，我继续帮您定位。"
     if running:
         return "该任务仍在处理中。如果等待时间过长，请补充页面显示内容或完整报错内容，我继续帮您定位。"
     return _diagnostic_unavailable_reply(language)
+
+
+def _wants_task_timing(message: Any) -> bool:
+    return TIME_DETAIL_REQUEST_PATTERN.search(str(message or "")) is not None
+
+
+def _has_timing_summary(timing: Dict[str, str]) -> bool:
+    return bool(timing.get("started_at") or timing.get("completed_at") or timing.get("duration"))
+
+
+def _normalize_datetime(date_text: str, time_text: str) -> str:
+    year, month, day = [int(part) for part in re.split(r"[/-]", date_text)]
+    hour, minute, second = [int(part) for part in time_text.split(":")]
+    return f"{year:04d}-{month:02d}-{day:02d} {hour:02d}:{minute:02d}:{second:02d}"
+
+
+def _date_part(datetime_text: str) -> str:
+    return datetime_text.split(" ", 1)[0]
+
+
+def _normalize_time_on_date(date_text: str, time_text: str) -> str:
+    return f"{date_text} {_normalize_time(time_text)}"
+
+
+def _normalize_time(time_text: str) -> str:
+    hour, minute, second = [int(part) for part in time_text.split(":")]
+    return f"{hour:02d}:{minute:02d}:{second:02d}"
+
+
+def _extract_task_timing(reply: Any) -> Dict[str, str]:
+    text = str(reply or "")
+    full_datetimes = [
+        _normalize_datetime(match.group("date"), match.group("time"))
+        for match in FULL_DATETIME_PATTERN.finditer(text)
+    ]
+    times = [_normalize_time(match.group(0)) for match in TIME_OF_DAY_PATTERN.finditer(text)]
+    duration = _extract_duration(text)
+
+    started_at = full_datetimes[0] if full_datetimes else ""
+    completed_at = ""
+    if len(full_datetimes) >= 2:
+        completed_at = full_datetimes[-1]
+    elif started_at and len(times) >= 2:
+        completed_at = _normalize_time_on_date(_date_part(started_at), times[-1])
+
+    return {
+        "started_at": started_at,
+        "completed_at": completed_at,
+        "duration": duration,
+    }
+
+
+def _extract_duration(text: str) -> str:
+    zh_match = DURATION_ZH_PATTERN.search(text)
+    if zh_match:
+        return _normalize_duration_parts(zh_match.group(1), zh_match.group(2), "zh-CN")
+    en_match = DURATION_EN_PATTERN.search(text)
+    if en_match:
+        return _normalize_duration_parts(en_match.group(1), en_match.group(2), "zh-CN")
+    return ""
+
+
+def _normalize_duration_parts(minutes: str, seconds: str, language: str) -> str:
+    minute_value = int(minutes)
+    second_value = int(seconds)
+    if language == "en":
+        minute_unit = "minute" if minute_value == 1 else "minutes"
+        second_unit = "second" if second_value == 1 else "seconds"
+        return f"{minute_value} {minute_unit} {second_value} {second_unit}"
+    return f"{minute_value} 分 {second_value} 秒"
+
+
+def _format_timing_reply(timing: Dict[str, str], language: str) -> str:
+    if language == "en":
+        parts = ["This task is complete."]
+        if timing.get("started_at"):
+            parts.append(f"Start time: {timing['started_at']}.")
+        if timing.get("completed_at"):
+            parts.append(f"Completion time: {timing['completed_at']}.")
+        if timing.get("duration"):
+            duration = _duration_for_language(timing["duration"], language)
+            parts.append(f"Duration: about {duration}.")
+        return " ".join(parts)
+
+    parts = ["该任务已完成。"]
+    if timing.get("started_at"):
+        parts.append(f"开始时间：{timing['started_at']}")
+    if timing.get("completed_at"):
+        parts.append(f"完成时间：{timing['completed_at']}")
+    if timing.get("duration"):
+        parts.append(f"耗时约 {_duration_for_language(timing['duration'], language)}")
+    if len(parts) == 1:
+        return "该任务已完成。"
+    return parts[0] + "；".join(parts[1:]) + "。"
+
+
+def _duration_for_language(duration: str, language: str) -> str:
+    match = re.search(r"(\d+)\s*分\s*(\d+)\s*秒", duration)
+    if match and language == "en":
+        return _normalize_duration_parts(match.group(1), match.group(2), language)
+    return duration
 
 
 def _diagnostic_unavailable_reply(language: str = "zh-CN") -> str:
