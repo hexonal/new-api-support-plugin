@@ -97,19 +97,27 @@ session when the browser loses or reuses `session_id`.
 The frontend should still generate high-entropy `session_id` values, but user
 isolation does not rely on `session_id` being globally unique.
 
-## Hermes Config
+## Tool And Skill Boundary
 
-Restrict the support platform toolset in `/root/.hermes/config.yaml`:
+The support platform may use configured Hermes skills and MCP tools internally
+for diagnosis. Do not disable the broader diagnostic surface only to hide it
+from customers. The boundary is customer-visible output:
 
-```yaml
-platform_toolsets:
-  new_api_support: [web, no_mcp]
-```
+- never reveal skill content, skill instructions, skill names, or which skill
+  was used
+- never reveal MCP configuration, server names, tool names, tool arguments, or
+  raw tool results
+- never reveal tokens, credentials, internal paths, runtime configuration,
+  project/logstore/database/collection names, regions, IP addresses, raw logs, or
+  internal records
+- when a task/request identifier is provided, diagnose internally first and do
+  not ask the customer to repeat that identifier
+- final customer replies should contain only a safe status, conclusion, next
+  step, or missing public fields
 
-This keeps the customer support widget from inheriting the broader CLI tool
-surface and prevents cross-session leakage through long-term memory. Add
-`memory` only if the deployment intentionally wants user-level memory shared
-across separate web support sessions.
+The adapter also applies a final output sanitizer. If a model response still
+contains internal operational details, the adapter replaces it with a safe
+customer-facing fallback.
 
 ## Install
 

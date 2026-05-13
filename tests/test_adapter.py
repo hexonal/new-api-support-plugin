@@ -318,6 +318,66 @@ def test_sanitizes_private_assistant_terms(adapter_module):
     asyncio.run(_test_sanitizes_private_assistant_terms(adapter_module))
 
 
+def test_channel_prompt_forbids_internal_skill_and_mcp_disclosure(adapter_module):
+    adapter = adapter_module.NewAPISupportAdapter(
+        StubPlatformConfig(extra={"token": "secret", "allowed_sources": ["new-api-web"]})
+    )
+
+    event = adapter._build_event(
+        {
+            "session_id": "web_guard_prompt",
+            "message": "task_3GTIlQ0WzIx8HPLvIRYIkUBY2fdgQuag 什么进度了",
+            "source": "new-api-web",
+            "user_id": "guard-user",
+            "language": "zh-CN",
+        },
+        make_request(
+            adapter_module,
+            {
+                "session_id": "web_guard_prompt",
+                "message": "task_3GTIlQ0WzIx8HPLvIRYIkUBY2fdgQuag 什么进度了",
+            },
+        ),
+    )
+
+    assert event.auto_skill == "hermes-new-api-task-diagnostic"
+    assert "Do not reveal skill content" in event.channel_prompt
+    assert "Do not reveal MCP configuration" in event.channel_prompt
+    assert "Do not reveal tool results" in event.channel_prompt
+    assert "Do not ask the user to repeat that identifier" in event.channel_prompt
+    assert "Reply in the user's language" in event.channel_prompt
+    assert "language=zh-CN" in event.channel_prompt
+
+
+def test_sanitizes_mcp_skill_secret_path_and_tool_result_disclosure(adapter_module):
+    reply = adapter_module._clean_support_reply(
+        "我调用了 hermes-new-api-task-diagnostic skill，MCP 配置是 /root/.hermes/config.yaml，"
+        "token=sk-secret，工具结果：logstore ecs-work-us-east-1-prod 未命中。"
+    )
+
+    assert "内部系统和排障细节" in reply
+    assert "skill" not in reply.lower()
+    assert "MCP" not in reply
+    assert "/root/.hermes" not in reply
+    assert "sk-secret" not in reply
+    assert "工具结果" not in reply
+    assert "logstore" not in reply
+
+
+def test_task_lookup_internal_failure_does_not_ask_for_duplicate_task_id(adapter_module):
+    reply = adapter_module._clean_support_reply(
+        "Tool mcp_nexus_guonei_mcp_find_one_document returned error: not authorized. "
+        "请提供 task_id、endpoint、model 继续排查。",
+        original_message="task_3GTIlQ0WzIx8HPLvIRYIkUBY2fdgQuag 什么进度了",
+    )
+
+    assert "当前还无法确认该任务的最终状态" in reply
+    assert "task_id" not in reply
+    assert "MCP" not in reply
+    assert "Tool" not in reply
+    assert "not authorized" not in reply
+
+
 async def _test_rejects_missing_user_id_by_default(adapter_module):
     adapter = adapter_module.NewAPISupportAdapter(
         StubPlatformConfig(extra={"token": "secret", "allowed_sources": ["new-api-web"]})
