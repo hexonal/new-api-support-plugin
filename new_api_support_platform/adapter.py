@@ -116,6 +116,7 @@ def _sanitize_support_reply(text: Any) -> str:
     for old, new in replacements.items():
         reply = reply.replace(old, new)
     reply = reply.replace("您好您", "您好")
+    reply = reply.replace("您您好", "您好")
     return reply
 
 
@@ -309,7 +310,7 @@ class NewAPISupportAdapter(BasePlatformAdapter):
         return self._json(
             {
                 "session_id": payload["session_id"],
-                "reply": reply or "",
+                "reply": _sanitize_support_reply(reply),
             }
         )
 

@@ -252,6 +252,35 @@ def test_builds_message_event_and_returns_agent_reply(adapter_module):
     asyncio.run(_test_builds_message_event_and_returns_agent_reply(adapter_module))
 
 
+async def _test_sanitizes_final_http_reply(adapter_module):
+    adapter = adapter_module.NewAPISupportAdapter(
+        StubPlatformConfig(
+            extra={
+                "token": "secret",
+                "allowed_sources": ["new-api-web"],
+            }
+        )
+    )
+
+    async def handler(_event):
+        return "您您好，我是隆江猪脚饭。"
+
+    adapter.set_message_handler(handler)
+
+    response = await adapter.handle_chat_request(
+        make_request(
+            adapter_module,
+            {"session_id": "web_abc", "message": "接口 403", "source": "new-api-web"},
+        )
+    )
+
+    assert json.loads(response.text)["reply"] == "您好，我是New API 技术支持。"
+
+
+def test_sanitizes_final_http_reply(adapter_module):
+    asyncio.run(_test_sanitizes_final_http_reply(adapter_module))
+
+
 async def _test_send_collects_fallback_reply(adapter_module):
     adapter = adapter_module.NewAPISupportAdapter(StubPlatformConfig(extra={"token": "secret"}))
     pending = asyncio.get_running_loop().create_future()
@@ -273,3 +302,4 @@ def test_sanitizes_internal_persona_from_support_reply(adapter_module):
         == "您，New API 技术支持这边先帮您排查，New API 技术支持会继续跟进。"
     )
     assert adapter_module._sanitize_support_reply("您好老师，请提供 request_id。") == "您好，请提供 request_id。"
+    assert adapter_module._sanitize_support_reply("您您好，我是隆江猪脚饭。") == "您好，我是New API 技术支持。"
