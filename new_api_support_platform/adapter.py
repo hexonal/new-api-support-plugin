@@ -106,9 +106,12 @@ def _context_lines(context: Any) -> list[str]:
 def _sanitize_support_reply(text: Any) -> str:
     reply = "" if text is None else str(text)
     replacements = {
+        "隆江猪脚饭这边": "New API 技术支持这边",
+        "隆江猪脚饭": "New API 技术支持",
         "龙江猪脚饭这边": "New API 技术支持这边",
         "龙江猪脚饭": "New API 技术支持",
         "少爷": "您",
+        "老师": "您好",
     }
     for old, new in replacements.items():
         reply = reply.replace(old, new)

@@ -269,6 +269,6 @@ def test_send_collects_fallback_reply(adapter_module):
 
 def test_sanitizes_internal_persona_from_support_reply(adapter_module):
     assert (
-        adapter_module._sanitize_support_reply("您好，龙江猪脚饭这边先帮少爷排查。")
-        == "您好，New API 技术支持这边先帮您排查。"
+        adapter_module._sanitize_support_reply("老师，隆江猪脚饭这边先帮少爷排查，龙江猪脚饭会继续跟进。")
+        == "您好，New API 技术支持这边先帮您排查，New API 技术支持会继续跟进。"
     )
