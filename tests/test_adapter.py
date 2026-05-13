@@ -378,6 +378,19 @@ def test_task_lookup_internal_failure_does_not_ask_for_duplicate_task_id(adapter
     assert "not authorized" not in reply
 
 
+def test_english_task_reply_does_not_return_chinese_when_language_is_en(adapter_module):
+    reply = adapter_module._clean_support_reply(
+        "当前状态：已完成。该任务在海外执行，已于 2026/05/13 成功完成。",
+        original_message="What is the status of task_3GTIlQ0WzIx8HPLvIRYIkUBY2fdgQuag?",
+        language="en",
+    )
+
+    assert reply.startswith("This task is complete")
+    assert "当前状态" not in reply
+    assert "海外" not in reply
+    assert "task_id" not in reply
+
+
 async def _test_rejects_missing_user_id_by_default(adapter_module):
     adapter = adapter_module.NewAPISupportAdapter(
         StubPlatformConfig(extra={"token": "secret", "allowed_sources": ["new-api-web"]})

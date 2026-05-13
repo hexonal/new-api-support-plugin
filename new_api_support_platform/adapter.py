@@ -166,15 +166,20 @@ def _context_lines(context: Any) -> list[str]:
     return lines
 
 
-def _clean_support_reply(reply: Any, original_message: Any = None) -> str:
+def _clean_support_reply(reply: Any, original_message: Any = None, language: Any = None) -> str:
     text = str(reply or "")
     for pattern, replacement in FORBIDDEN_REPLY_PATTERNS:
         text = pattern.sub(replacement, text)
     text = text.strip()
+    preferred_language = _preferred_language(language, original_message, text)
     if _contains_internal_disclosure(text):
         if _contains_tracking_identifier(original_message):
-            return _diagnostic_unavailable_reply(_detect_language(original_message) or _detect_language(text))
-        return _internal_details_refusal(_detect_language(text))
+            return _diagnostic_unavailable_reply(preferred_language)
+        return _internal_details_refusal(preferred_language)
+    if _is_language_mismatch(text, preferred_language):
+        if _contains_tracking_identifier(original_message):
+            return _safe_tracking_reply(text, preferred_language)
+        return _internal_details_refusal(preferred_language)
     return text
 
 
@@ -191,16 +196,63 @@ def _is_internal_details_request(message: Any) -> bool:
 
 
 def _detect_language(message: Any) -> str:
-    text = str(message or "")
+    text = str(message or "").strip()
+    if not text:
+        return ""
     if re.search(r"[\u4e00-\u9fff]", text):
         return "zh-CN"
     return "en"
+
+
+def _preferred_language(language: Any = None, *messages: Any) -> str:
+    value = str(language or "").strip().lower()
+    if value.startswith("en"):
+        return "en"
+    if value.startswith("zh"):
+        return "zh-CN"
+    for message in messages:
+        detected = _detect_language(message)
+        if detected:
+            return detected
+    return "zh-CN"
+
+
+def _contains_chinese(message: Any) -> bool:
+    return re.search(r"[\u4e00-\u9fff]", str(message or "")) is not None
+
+
+def _is_language_mismatch(reply: Any, language: str) -> bool:
+    if language == "en":
+        return _contains_chinese(reply)
+    return False
 
 
 def _internal_details_refusal(language: str = "zh-CN") -> str:
     if language == "en":
         return "I can't provide internal system, configuration, credential, path, or diagnostic details."
     return "这些属于内部系统和排障细节，我不能对外提供。"
+
+
+def _safe_tracking_reply(reply: Any, language: str = "zh-CN") -> str:
+    text = str(reply or "").lower()
+    completed = any(word in text for word in ("已完成", "成功完成", "completed", "successfully completed"))
+    failed = any(word in text for word in ("失败", "未成功", "failed", "error"))
+    running = any(word in text for word in ("处理中", "执行中", "排队", "running", "processing", "queued"))
+    if language == "en":
+        if completed:
+            return "This task is complete and the result has been returned. If you still cannot see it, share the request time, endpoint, model, and exact error text so I can continue checking."
+        if failed:
+            return "This task did not complete successfully. Please share the request time, endpoint, model, and exact error text so I can continue checking."
+        if running:
+            return "This task is still being processed. If it has been waiting too long, share the request time, endpoint, model, and exact error text so I can continue checking."
+        return _diagnostic_unavailable_reply(language)
+    if completed:
+        return "该任务已完成，结果已回传。如果您仍然看不到结果，请补充请求时间、endpoint、模型和完整报错内容，我继续帮您定位。"
+    if failed:
+        return "该任务未成功完成。请补充请求时间、endpoint、模型和完整报错内容，我继续帮您定位。"
+    if running:
+        return "该任务仍在处理中。如果等待时间过长，请补充请求时间、endpoint、模型和完整报错内容，我继续帮您定位。"
+    return _diagnostic_unavailable_reply(language)
 
 
 def _diagnostic_unavailable_reply(language: str = "zh-CN") -> str:
@@ -427,7 +479,11 @@ class NewAPISupportAdapter(BasePlatformAdapter):
         return self._json(
             {
                 "session_id": payload["session_id"],
-                "reply": _clean_support_reply(reply, original_message=payload.get("message")),
+                "reply": _clean_support_reply(
+                    reply,
+                    original_message=payload.get("message"),
+                    language=payload.get("language"),
+                ),
             }
         )
 
@@ -481,7 +537,9 @@ class NewAPISupportAdapter(BasePlatformAdapter):
         return self._json(
             {
                 "session_id": payload["session_id"],
-                "reply": _internal_details_refusal(_detect_language(payload.get("message"))),
+                "reply": _internal_details_refusal(
+                    _preferred_language(payload.get("language"), payload.get("message"))
+                ),
             }
         )
 
