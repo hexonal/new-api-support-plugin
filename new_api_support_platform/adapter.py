@@ -34,19 +34,6 @@ DEFAULT_MAX_BODY_BYTES = 65536
 DEFAULT_MAX_MESSAGE_CHARS = 4000
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 180
 
-CUSTOMER_SUPPORT_PROMPT = """\
-You are replying as the New API customer-support agent.
-Rules:
-- Keep replies concise, polite, and directly actionable.
-- If the user reports an API failure, ask first for the minimum useful evidence: curl, request_id, task_id, model, endpoint, and timestamp.
-- Do not invent backend query results. If the evidence is missing, ask for it before claiming a root cause.
-- Do not expose internal tokens, credentials, server paths, or private configuration.
-- For billing, routing, quota, token, or permission issues, separate confirmed facts from the next diagnostic step.
-- This is a customer-facing web support channel. Do not use owner-only nicknames or internal assistant personas.
-- Present yourself only as New API technical support when identity matters.
-- Do not address customers as "老师", "少爷", or any private/internal nickname. Use neutral wording such as "您好".
-"""
-
 
 def _truthy(value: Any, default: bool = False) -> bool:
     if value is None:
@@ -78,46 +65,6 @@ def _env_first(name: str, extra: Dict[str, Any], key: str, default: Any = None) 
 def _sanitize_id(value: Any, default: str = "anonymous") -> str:
     text = str(value if value is not None else default).strip() or default
     return re.sub(r"[^A-Za-z0-9_.:@-]+", "_", text)[:160]
-
-
-def _context_lines(context: Any) -> list[str]:
-    if not isinstance(context, dict):
-        return []
-    keys = (
-        "page_url",
-        "path",
-        "title",
-        "user_agent",
-        "client_ip",
-        "referrer",
-        "locale",
-    )
-    lines: list[str] = []
-    for key in keys:
-        value = context.get(key)
-        if value is None:
-            continue
-        text = str(value).strip()
-        if text:
-            lines.append(f"{key}={text[:500]}")
-    return lines
-
-
-def _sanitize_support_reply(text: Any) -> str:
-    reply = "" if text is None else str(text)
-    replacements = {
-        "隆江猪脚饭这边": "New API 技术支持这边",
-        "隆江猪脚饭": "New API 技术支持",
-        "龙江猪脚饭这边": "New API 技术支持这边",
-        "龙江猪脚饭": "New API 技术支持",
-        "少爷": "您",
-        "老师": "您",
-    }
-    for old, new in replacements.items():
-        reply = reply.replace(old, new)
-    reply = reply.replace("您好您", "您好")
-    reply = reply.replace("您您好", "您好")
-    return reply
 
 
 def check_new_api_support_requirements() -> bool:
@@ -310,14 +257,14 @@ class NewAPISupportAdapter(BasePlatformAdapter):
         return self._json(
             {
                 "session_id": payload["session_id"],
-                "reply": _sanitize_support_reply(reply),
+                "reply": reply or "",
             }
         )
 
     async def _call_handler(self, event: MessageEvent) -> str:
         response = await self._message_handler(event)
         if response is not None:
-            return _sanitize_support_reply(response)
+            return str(response)
 
         loop = asyncio.get_running_loop()
         future = loop.create_future()
@@ -370,20 +317,7 @@ class NewAPISupportAdapter(BasePlatformAdapter):
             raw_message=payload,
             message_id=message_id,
             auto_skill=self.auto_skill,
-            channel_prompt=self._channel_prompt(payload, request),
         )
-
-    def _channel_prompt(self, payload: Dict[str, Any], request: Any) -> str:
-        lines = [CUSTOMER_SUPPORT_PROMPT, "Request context:"]
-        lines.append(f"source={str(payload.get('source') or 'new-api-web').strip()}")
-        lines.append(f"session_id={str(payload.get('session_id') or '').strip()}")
-        if payload.get("role") is not None:
-            lines.append(f"role={payload.get('role')}")
-        lines.extend(_context_lines(payload.get("context")))
-        forwarded_for = getattr(request, "headers", {}).get("X-Forwarded-For") if hasattr(request, "headers") else None
-        if forwarded_for:
-            lines.append(f"forwarded_for={str(forwarded_for)[:200]}")
-        return "\n".join(lines)
 
     def _check_auth(self, request: Any) -> Optional[Any]:
         if not self.require_token:
@@ -411,7 +345,7 @@ class NewAPISupportAdapter(BasePlatformAdapter):
     ) -> SendResult:
         future = self._pending_http_replies.get(str(chat_id))
         if future is not None and not future.done():
-            future.set_result(_sanitize_support_reply(content))
+            future.set_result(content)
         return SendResult(success=True, message_id=str(uuid.uuid4()), raw_response={"reply_to": reply_to, "metadata": metadata})
 
     async def send_typing(self, chat_id: str, metadata: Optional[Dict[str, Any]] = None) -> None:
@@ -439,12 +373,6 @@ def register(ctx: Any) -> None:
         allowed_users_env="NEW_API_SUPPORT_ALLOWED_USERS",
         allow_all_env="NEW_API_SUPPORT_ALLOW_ALL_USERS",
         max_message_length=DEFAULT_MAX_MESSAGE_CHARS,
-        emoji="🛟",
+        emoji="🌐",
         allow_update_command=False,
-        platform_hint=(
-            "You are chatting with a customer through a New API website support widget. "
-            "Use concise customer-support language. Ask for request_id, task_id, curl, "
-            "endpoint, model, and timestamp when diagnosing API issues. Do not claim "
-            "you checked backend systems unless a tool result confirms it."
-        ),
     )

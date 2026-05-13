@@ -201,7 +201,6 @@ async def _test_builds_message_event_and_returns_agent_reply(adapter_module):
         StubPlatformConfig(
             extra={
                 "token": "secret",
-                "auto_skill": "hermes-new-api-customer-support-style",
                 "request_timeout_seconds": 5,
                 "allowed_sources": ["new-api-web"],
             }
@@ -239,20 +238,18 @@ async def _test_builds_message_event_and_returns_agent_reply(adapter_module):
     assert body == {"session_id": "web_abc", "reply": "请把 request_id 发我，我来查。"}
     event = captured["event"]
     assert event.text == "接口 403 怎么办？"
-    assert event.auto_skill == "hermes-new-api-customer-support-style"
+    assert event.auto_skill is None
     assert event.source.chat_id == "web_abc"
     assert event.source.user_id == "new-api-web:123"
-    assert "page_url=https://new-api.example.com/contact" in event.channel_prompt
-    assert "Do not invent backend query results" in event.channel_prompt
-    assert "Do not use owner-only nicknames" in event.channel_prompt
-    assert 'Do not address customers as "老师"' in event.channel_prompt
+    assert event.channel_prompt is None
+    assert event.raw_message["context"]["page_url"] == "https://new-api.example.com/contact"
 
 
 def test_builds_message_event_and_returns_agent_reply(adapter_module):
     asyncio.run(_test_builds_message_event_and_returns_agent_reply(adapter_module))
 
 
-async def _test_sanitizes_final_http_reply(adapter_module):
+async def _test_returns_handler_reply_verbatim(adapter_module):
     adapter = adapter_module.NewAPISupportAdapter(
         StubPlatformConfig(
             extra={
@@ -263,7 +260,7 @@ async def _test_sanitizes_final_http_reply(adapter_module):
     )
 
     async def handler(_event):
-        return "您您好，我是隆江猪脚饭。"
+        return "raw handler reply"
 
     adapter.set_message_handler(handler)
 
@@ -274,11 +271,11 @@ async def _test_sanitizes_final_http_reply(adapter_module):
         )
     )
 
-    assert json.loads(response.text)["reply"] == "您好，我是New API 技术支持。"
+    assert json.loads(response.text)["reply"] == "raw handler reply"
 
 
-def test_sanitizes_final_http_reply(adapter_module):
-    asyncio.run(_test_sanitizes_final_http_reply(adapter_module))
+def test_returns_handler_reply_verbatim(adapter_module):
+    asyncio.run(_test_returns_handler_reply_verbatim(adapter_module))
 
 
 async def _test_send_collects_fallback_reply(adapter_module):
@@ -294,12 +291,3 @@ async def _test_send_collects_fallback_reply(adapter_module):
 
 def test_send_collects_fallback_reply(adapter_module):
     asyncio.run(_test_send_collects_fallback_reply(adapter_module))
-
-
-def test_sanitizes_internal_persona_from_support_reply(adapter_module):
-    assert (
-        adapter_module._sanitize_support_reply("老师，隆江猪脚饭这边先帮少爷排查，龙江猪脚饭会继续跟进。")
-        == "您，New API 技术支持这边先帮您排查，New API 技术支持会继续跟进。"
-    )
-    assert adapter_module._sanitize_support_reply("您好老师，请提供 request_id。") == "您好，请提供 request_id。"
-    assert adapter_module._sanitize_support_reply("您您好，我是隆江猪脚饭。") == "您好，我是New API 技术支持。"
