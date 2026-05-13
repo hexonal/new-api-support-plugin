@@ -1,0 +1,66 @@
+name: new-api
+label: New API Support
+kind: platform
+version: 0.1.0
+description: >
+  HTTP gateway platform adapter for routing New API web support messages
+  into Hermes Agent sessions without exposing Hermes credentials to browsers.
+author: Hexonal
+requires_env:
+  - name: NEW_API_SUPPORT_TOKEN
+    description: "Bearer token used by New API backend when calling the support endpoint."
+    prompt: "New API support bearer token"
+    password: true
+optional_env:
+  - name: NEW_API_SUPPORT_ENABLED
+    description: "Enable the New API support platform adapter (true/false)."
+    prompt: "Enable New API support adapter?"
+    password: false
+  - name: NEW_API_SUPPORT_HOST
+    description: "HTTP bind host. Keep 127.0.0.1 unless a trusted reverse proxy is in front."
+    prompt: "Bind host"
+    password: false
+  - name: NEW_API_SUPPORT_PORT
+    description: "HTTP bind port for the support endpoint."
+    prompt: "Bind port"
+    password: false
+  - name: NEW_API_SUPPORT_PATH
+    description: "POST path for chat requests."
+    prompt: "Chat path"
+    password: false
+  - name: NEW_API_SUPPORT_ALLOWED_SOURCES
+    description: "Comma-separated allowed request source values. Use * to allow all. Defaults to new-api-web."
+    prompt: "Allowed request sources"
+    password: false
+  - name: NEW_API_SUPPORT_ALLOW_ALL_USERS
+    description: "Allow authenticated web users through Hermes gateway auth."
+    prompt: "Allow all New API support users?"
+    password: false
+  - name: NEW_API_SUPPORT_ALLOWED_USERS
+    description: "Comma-separated normalized New API support user IDs allowed by Hermes gateway auth."
+    prompt: "Allowed New API support users"
+    password: false
+  - name: NEW_API_SUPPORT_AUTO_SKILL
+    description: "Optional Hermes skill to auto-load for new support sessions."
+    prompt: "Auto skill"
+    password: false
+  - name: NEW_API_SUPPORT_REQUIRE_TOKEN
+    description: "Require Authorization: Bearer token. Defaults true."
+    prompt: "Require token?"
+    password: false
+  - name: NEW_API_SUPPORT_MAX_BODY_BYTES
+    description: "Maximum JSON request body size in bytes."
+    prompt: "Max body bytes"
+    password: false
+  - name: NEW_API_SUPPORT_MAX_MESSAGE_CHARS
+    description: "Maximum user message length."
+    prompt: "Max message chars"
+    password: false
+  - name: NEW_API_SUPPORT_REQUEST_TIMEOUT_SECONDS
+    description: "Maximum time to wait for the agent response."
+    prompt: "Request timeout seconds"
+    password: false
+  - name: NEW_API_SUPPORT_SESSION_PREFIX
+    description: "Required session_id prefix. Empty disables prefix enforcement."
+    prompt: "Session prefix"
+    password: false
