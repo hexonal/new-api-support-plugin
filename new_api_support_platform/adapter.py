@@ -81,13 +81,14 @@ INTERNAL_DISCLOSURE_PATTERN = re.compile(
 INTERNAL_DETAILS_REQUEST_PATTERN = re.compile(
     r"(?:"
     r"(?:MCP|SLS|logstore|skill|tool|工具|系统提示词|通道提示词|隐藏指令|内部记忆|运行时配置|"
+    r"安全(?:逻辑|规则|边界|策略)|边界(?:规则|策略)|guardrail|"
     r"内部(?:系统|工具|配置|路径|记录|日志|排障|链路|数据源))"
     r".*"
     r"(?:是什么|有哪些|发我|给我|告诉我|展示|列出|配置|内容|结果|怎么|如何|show|list|get|tell|give|what|how)"
     r"|"
     r"(?:发我|给我|告诉我|展示|列出|show|list|get|tell|give)"
     r".*"
-    r"(?:MCP|SLS|logstore|skill|tool|工具|系统提示词|内部记忆|运行时配置|内部(?:系统|工具|配置|路径|记录|日志|排障|链路|数据源))"
+    r"(?:MCP|SLS|logstore|skill|tool|工具|系统提示词|内部记忆|运行时配置|安全(?:逻辑|规则|边界|策略)|边界(?:规则|策略)|guardrail|内部(?:系统|工具|配置|路径|记录|日志|排障|链路|数据源))"
     r")",
     re.IGNORECASE,
 )
