@@ -33,6 +33,8 @@ DEFAULT_SESSION_PREFIX = "web_"
 DEFAULT_MAX_BODY_BYTES = 65536
 DEFAULT_MAX_MESSAGE_CHARS = 4000
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 180
+DEFAULT_REQUIRE_USER_ID = True
+USER_ID_FIELDS = ("user_id", "visitor_id", "anonymous_id", "client_id")
 
 
 def _truthy(value: Any, default: bool = False) -> bool:
@@ -65,6 +67,24 @@ def _env_first(name: str, extra: Dict[str, Any], key: str, default: Any = None) 
 def _sanitize_id(value: Any, default: str = "anonymous") -> str:
     text = str(value if value is not None else default).strip() or default
     return re.sub(r"[^A-Za-z0-9_.:@-]+", "_", text)[:160]
+
+
+def _payload_user_id(payload: Dict[str, Any]) -> str:
+    for key in USER_ID_FIELDS:
+        value = payload.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return _sanitize_id(text)
+    return ""
+
+
+def _conversation_key(source_name: str, user_id: str, session_id: str) -> str:
+    source_part = _sanitize_id(source_name, "new-api-web")
+    user_part = _sanitize_id(user_id)
+    session_part = _sanitize_id(session_id, "session")
+    return f"{source_part}:user:{user_part}:session:{session_part}"
 
 
 def check_new_api_support_requirements() -> bool:
@@ -100,6 +120,7 @@ def _env_enablement() -> Optional[dict]:
             os.getenv("NEW_API_SUPPORT_REQUEST_TIMEOUT_SECONDS"),
             DEFAULT_REQUEST_TIMEOUT_SECONDS,
         ),
+        "require_user_id": _truthy(os.getenv("NEW_API_SUPPORT_REQUIRE_USER_ID"), DEFAULT_REQUIRE_USER_ID),
     }
 
 
@@ -167,11 +188,16 @@ class NewAPISupportAdapter(BasePlatformAdapter):
             ),
             DEFAULT_REQUEST_TIMEOUT_SECONDS,
         )
+        self.require_user_id = _truthy(
+            _env_first("NEW_API_SUPPORT_REQUIRE_USER_ID", extra, "require_user_id", DEFAULT_REQUIRE_USER_ID),
+            DEFAULT_REQUIRE_USER_ID,
+        )
 
         self._app: Any = None
         self._runner: Any = None
         self._site: Any = None
         self._pending_http_replies: Dict[str, asyncio.Future] = {}
+        self._conversation_locks: Dict[str, asyncio.Lock] = {}
 
     @property
     def name(self) -> str:
@@ -243,7 +269,7 @@ class NewAPISupportAdapter(BasePlatformAdapter):
         event = self._build_event(payload, request)
         try:
             reply = await asyncio.wait_for(
-                self._call_handler(event),
+                self._call_handler_serialized(event),
                 timeout=self.request_timeout_seconds,
             )
         except asyncio.TimeoutError:
@@ -260,6 +286,15 @@ class NewAPISupportAdapter(BasePlatformAdapter):
                 "reply": reply or "",
             }
         )
+
+    async def _call_handler_serialized(self, event: MessageEvent) -> str:
+        conversation_key = str(event.source.chat_id)
+        lock = self._conversation_locks.get(conversation_key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._conversation_locks[conversation_key] = lock
+        async with lock:
+            return await self._call_handler(event)
 
     async def _call_handler(self, event: MessageEvent) -> str:
         response = await self._message_handler(event)
@@ -292,22 +327,24 @@ class NewAPISupportAdapter(BasePlatformAdapter):
         source = str(payload.get("source") or "new-api-web").strip()
         if self.allowed_sources and "*" not in self.allowed_sources and source not in self.allowed_sources:
             return self._json({"error": "source_not_allowed"}, status=403)
+        if self.require_user_id and not _payload_user_id(payload):
+            return self._json({"error": "missing_user_id"}, status=400)
         return None
 
     def _build_event(self, payload: Dict[str, Any], request: Any) -> MessageEvent:
         source_name = str(payload.get("source") or "new-api-web").strip()
         session_id = str(payload["session_id"]).strip()
-        user_id = _sanitize_id(payload.get("user_id", "anonymous"))
+        user_id = _payload_user_id(payload) or "anonymous"
         user_name = str(payload.get("user_name") or payload.get("username") or user_id)
         hermes_user_id = f"{source_name}:{user_id}"
+        conversation_id = _conversation_key(source_name, user_id, session_id)
         message_id = str(payload.get("message_id") or uuid.uuid4())
         source = self.build_source(
-            chat_id=session_id,
+            chat_id=conversation_id,
             chat_name="New API Web Support",
             chat_type="dm",
             user_id=hermes_user_id,
             user_name=user_name,
-            thread_id=session_id,
             message_id=message_id,
         )
         return MessageEvent(

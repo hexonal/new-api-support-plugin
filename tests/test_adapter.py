@@ -239,7 +239,8 @@ async def _test_builds_message_event_and_returns_agent_reply(adapter_module):
     event = captured["event"]
     assert event.text == "接口 403 怎么办？"
     assert event.auto_skill is None
-    assert event.source.chat_id == "web_abc"
+    assert event.source.chat_id == "new-api-web:user:123:session:web_abc"
+    assert event.source.thread_id is None
     assert event.source.user_id == "new-api-web:123"
     assert event.channel_prompt is None
     assert event.raw_message["context"]["page_url"] == "https://new-api.example.com/contact"
@@ -267,7 +268,12 @@ async def _test_returns_handler_reply_verbatim(adapter_module):
     response = await adapter.handle_chat_request(
         make_request(
             adapter_module,
-            {"session_id": "web_abc", "message": "接口 403", "source": "new-api-web"},
+            {
+                "session_id": "web_abc",
+                "message": "接口 403",
+                "source": "new-api-web",
+                "user_id": "verbatim-user",
+            },
         )
     )
 
@@ -276,6 +282,161 @@ async def _test_returns_handler_reply_verbatim(adapter_module):
 
 def test_returns_handler_reply_verbatim(adapter_module):
     asyncio.run(_test_returns_handler_reply_verbatim(adapter_module))
+
+
+async def _test_rejects_missing_user_id_by_default(adapter_module):
+    adapter = adapter_module.NewAPISupportAdapter(
+        StubPlatformConfig(extra={"token": "secret", "allowed_sources": ["new-api-web"]})
+    )
+
+    response = await adapter.handle_chat_request(
+        make_request(
+            adapter_module,
+            {"session_id": "web_abc", "message": "hi", "source": "new-api-web"},
+        )
+    )
+
+    assert response.status == 400
+    assert json.loads(response.text)["error"] == "missing_user_id"
+
+
+def test_rejects_missing_user_id_by_default(adapter_module):
+    asyncio.run(_test_rejects_missing_user_id_by_default(adapter_module))
+
+
+async def _test_accepts_alternate_user_id_fields(adapter_module):
+    adapter = adapter_module.NewAPISupportAdapter(
+        StubPlatformConfig(extra={"token": "secret", "allowed_sources": ["new-api-web"]})
+    )
+    captured = {}
+
+    async def handler(event):
+        captured["event"] = event
+        return "ok"
+
+    adapter.set_message_handler(handler)
+    response = await adapter.handle_chat_request(
+        make_request(
+            adapter_module,
+            {
+                "session_id": "web_abc",
+                "message": "hi",
+                "source": "new-api-web",
+                "visitor_id": "visitor 42",
+            },
+        )
+    )
+
+    assert response.status == 200
+    assert captured["event"].source.chat_id == "new-api-web:user:visitor_42:session:web_abc"
+    assert captured["event"].source.user_id == "new-api-web:visitor_42"
+
+
+def test_accepts_alternate_user_id_fields(adapter_module):
+    asyncio.run(_test_accepts_alternate_user_id_fields(adapter_module))
+
+
+async def _test_same_session_id_is_isolated_by_user_id(adapter_module):
+    adapter = adapter_module.NewAPISupportAdapter(
+        StubPlatformConfig(extra={"token": "secret", "allowed_sources": ["new-api-web"]})
+    )
+    captured = []
+
+    async def handler(event):
+        captured.append(event)
+        return "ok"
+
+    adapter.set_message_handler(handler)
+    for user_id in ("user-a", "user-b"):
+        response = await adapter.handle_chat_request(
+            make_request(
+                adapter_module,
+                {
+                    "session_id": "web_shared",
+                    "message": f"hi from {user_id}",
+                    "source": "new-api-web",
+                    "user_id": user_id,
+                },
+            )
+        )
+        assert response.status == 200
+
+    assert captured[0].source.chat_id == "new-api-web:user:user-a:session:web_shared"
+    assert captured[1].source.chat_id == "new-api-web:user:user-b:session:web_shared"
+    assert captured[0].source.chat_id != captured[1].source.chat_id
+
+
+def test_same_session_id_is_isolated_by_user_id(adapter_module):
+    asyncio.run(_test_same_session_id_is_isolated_by_user_id(adapter_module))
+
+
+async def _test_same_conversation_requests_are_serialized(adapter_module):
+    adapter = adapter_module.NewAPISupportAdapter(
+        StubPlatformConfig(
+            extra={
+                "token": "secret",
+                "allowed_sources": ["new-api-web"],
+                "request_timeout_seconds": 5,
+            }
+        )
+    )
+    order = []
+    first_entered = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async def handler(event):
+        order.append(("start", event.text))
+        if event.text == "first":
+            first_entered.set()
+            await release_first.wait()
+        order.append(("end", event.text))
+        return event.text
+
+    adapter.set_message_handler(handler)
+    first = asyncio.create_task(
+        adapter.handle_chat_request(
+            make_request(
+                adapter_module,
+                {
+                    "session_id": "web_serial",
+                    "message": "first",
+                    "source": "new-api-web",
+                    "user_id": "serial-user",
+                },
+            )
+        )
+    )
+    await first_entered.wait()
+    second = asyncio.create_task(
+        adapter.handle_chat_request(
+            make_request(
+                adapter_module,
+                {
+                    "session_id": "web_serial",
+                    "message": "second",
+                    "source": "new-api-web",
+                    "user_id": "serial-user",
+                },
+            )
+        )
+    )
+    await asyncio.sleep(0.05)
+    assert order == [("start", "first")]
+    release_first.set()
+    first_response, second_response = await asyncio.gather(first, second)
+
+    assert first_response.status == 200
+    assert second_response.status == 200
+    assert order == [
+        ("start", "first"),
+        ("end", "first"),
+        ("start", "second"),
+        ("end", "second"),
+    ]
+
+
+def test_same_conversation_requests_are_serialized(adapter_module):
+    asyncio.run(_test_same_conversation_requests_are_serialized(adapter_module))
 
 
 async def _test_send_collects_fallback_reply(adapter_module):
