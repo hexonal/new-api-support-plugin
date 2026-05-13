@@ -391,6 +391,19 @@ def test_english_task_reply_does_not_return_chinese_when_language_is_en(adapter_
     assert "task_id" not in reply
 
 
+def test_task_success_reply_is_reduced_to_customer_safe_summary(adapter_module):
+    reply = adapter_module._clean_support_reply(
+        "当前状态：已完成\n\n结论：该任务在海外执行，模型 dreamina，输出 1 个视频文件，已生成回调。",
+        original_message="task_3GTIlQ0WzIx8HPLvIRYIkUBY2fdgQuag 什么进度了",
+        language="zh-CN",
+    )
+
+    assert reply.startswith("该任务已完成")
+    assert "海外" not in reply
+    assert "模型" not in reply
+    assert "回调" not in reply
+
+
 async def _test_rejects_missing_user_id_by_default(adapter_module):
     adapter = adapter_module.NewAPISupportAdapter(
         StubPlatformConfig(extra={"token": "secret", "allowed_sources": ["new-api-web"]})
