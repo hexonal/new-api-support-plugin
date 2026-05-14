@@ -15,22 +15,27 @@ description: 当 New API / ima router 技术支持用户已经提供 task_id 或
 - 用户给出 `request_...` 并询问请求状态、路由、权限、额度或账单问题。
 - 同一会话前文已给出任务/请求标识，后续说“你自己分析”“帮我查”“继续”。
 
-## task_id 首选诊断路径
+## task_id 诊断路径
 
-当用户给出 `task_...` 并询问状态、是否完成、时间或耗时时，必须先按下面顺序执行：
+当用户给出 `task_...` 并询问状态、是否完成、时间或耗时时，必须按当前可用的只读 MCP 能力逐个自行查询，不要只固定查一个日志入口。
 
-1. 首先使用 `sls_haiwai_work` 的日志查询工具查询 work 日志。
-2. 查询参数固定为：
-   - `project`: `ecs-liveme-api-work`
-   - `logStore`: `ecs-work-us-east-1-prod`
-   - `regionId`: `us-east-1`
-   - `query`: 用户提供的完整 task ID
-   - `from_time`: `now-7d`
-   - `to_time`: `now`
-   - `limit`: `30`
-3. 如果第一步命中日志，直接从这些结果归纳任务状态、开始时间、完成时间和耗时。
-4. 只有第一步完全未命中，才继续使用其他只读诊断路径。
-5. 不要先查 MongoDB、PostgreSQL、项目列表、workspace 列表或猜测其他 project/logstore。
+默认顺序：
+
+1. 先查与任务记录相关的 MCP，例如国内/海外任务数据源。优先用完整 task ID 精确匹配；精确未命中时再尝试同一数据源的安全模糊匹配。
+2. 再查海外 work 日志 MCP。
+3. 再查海外补充日志 MCP。
+4. 再查国内 work 日志 MCP。
+5. 再查国内 API 日志 MCP。
+6. 最后才使用其他已配置的只读诊断路径。
+
+执行要求：
+
+- 每个 MCP 查询都必须使用用户提供的完整 task ID，不能拆分或改写。
+- 当前一个 MCP 没有命中、返回空结果或只显示非终态轮询片段时，继续查下一个 MCP。
+- 命中任务记录或日志后，从可确认字段归纳任务状态、开始时间、完成时间和耗时。
+- 如果多个 MCP 返回互补信息，以能证明最终状态和时间线的信息为准；不要把单个未命中写成任务不存在。
+- 不要先列项目、列 workspace、枚举环境或向用户反问 region/project/logstore。
+- 可以在内部使用 MCP、数据库和日志工具，但对客回复不能暴露这些内部系统、工具名、数据源名或查询路径。
 
 ## 状态和时间判断
 
@@ -45,8 +50,8 @@ description: 当 New API / ima router 技术支持用户已经提供 task_id 或
 - 不要先反问用户重复提供已有的 `task_id` / `request_id`。
 - 若缺少必要上下文，只追问缺失的公开字段：请求时间、endpoint、模型、完整报错内容、脱敏 curl。
 - 不要编造诊断结果；没有命中或工具不可用时，明确说当前还无法确认根因。
-- joyme 等轮询类任务：直接搜 task ID 可能只看到大量 `polling attempt` / `task status: running` 日志，最终成功/失败状态被淹没。此时应改用关键词分流查询：先确认外部任务 ID，再用 `task_xxx and (completed or failed or "task status: completed" or "task status: failed")` 或外部 ID + 结果关键词定位最终状态。
-- MongoDB 工具返回 Unauthorized 时：不再尝试其他 MongoDB 工具，继续按 SLS 日志链路排查；SLS 也未命中时直接告知查询工具暂时不可用。
+- joyme 等轮询类任务：直接搜 task ID 可能只看到大量 `polling attempt` / `task status: running` 日志，最终成功/失败状态被淹没。此时应继续查询后续 MCP，并在同一 MCP 内追加完成/失败关键词定位最终状态。
+- 某个 MCP 返回 Unauthorized、超时或工具错误时，只跳过该 MCP，继续查后续 MCP；不要因为一个 MCP 失败就停止全部诊断。
 
 ## 对客输出硬约束
 
