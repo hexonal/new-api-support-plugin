@@ -104,8 +104,13 @@ FULL_DATETIME_PATTERN = re.compile(
 )
 TIME_OF_DAY_PATTERN = re.compile(r"\b\d{1,2}:\d{2}:\d{2}\b")
 DURATION_ZH_PATTERN = re.compile(r"(?:耗时|用时|duration)?\s*(?:约|大约|about)?\s*(\d+)\s*分(?:钟)?\s*(\d+)\s*秒", re.IGNORECASE)
+DURATION_ZH_SECONDS_PATTERN = re.compile(r"(?:耗时|用时|duration)?\s*(?:约|大约|about)?\s*(\d+)\s*秒", re.IGNORECASE)
 DURATION_EN_PATTERN = re.compile(
     r"(?:duration|took|used)?\s*(?:about|around|approximately)?\s*(\d+)\s*(?:minutes?|mins?|m)\s*(\d+)\s*(?:seconds?|secs?|s)\b",
+    re.IGNORECASE,
+)
+DURATION_EN_SECONDS_PATTERN = re.compile(
+    r"(?:duration|took|used)?\s*(?:about|around|approximately)?\s*(\d+)\s*(?:seconds?|secs?|s)\b",
     re.IGNORECASE,
 )
 
@@ -251,12 +256,13 @@ def _internal_details_refusal(language: str = "zh-CN") -> str:
 def _safe_tracking_reply(reply: Any, language: str = "zh-CN", original_message: Any = None) -> str:
     original_text = str(reply or "")
     text = original_text.lower()
-    completed = re.search(r"(?:已完成|成功完成|完成了|已经完成|\bcompleted\b|\bsuccessfully completed\b|\bsucceeded\b)", text, re.IGNORECASE) is not None
     failed = re.search(
-        r"(?:当前状态|任务|task|status).{0,24}(?:失败|未成功|failed|did not complete|not complete)",
+        r"(?:当前状态|任务|task|status).{0,24}(?:失败|未成功|failed|did not complete|not complete)"
+        r"|(?:未成功完成|没有成功完成|did not complete successfully)",
         text,
         re.IGNORECASE,
     ) is not None
+    completed = re.search(r"(?:已完成|成功完成|完成了|已经完成|\bcompleted\b|\bsuccessfully completed\b|\bsucceeded\b)", text, re.IGNORECASE) is not None
     running = re.search(
         r"(?:当前状态|任务|task|status).{0,24}(?:处理中|执行中|排队|running|processing|queued)",
         text,
@@ -265,21 +271,25 @@ def _safe_tracking_reply(reply: Any, language: str = "zh-CN", original_message: 
     wants_timing = _wants_task_timing(original_message)
     timing = _extract_task_timing(original_text) if wants_timing else {}
     if language == "en":
+        if failed:
+            if wants_timing and _has_timing_summary(timing):
+                return _format_timing_reply(timing, language, completed=False)
+            return "This task did not complete successfully. Please share what you see on the page and any exact error text so I can continue checking."
         if completed:
             if wants_timing and _has_timing_summary(timing):
                 return _format_timing_reply(timing, language)
             return "This task is complete and the result has been returned. If you still cannot see it, share what you see on the page and any exact error text so I can continue checking."
-        if failed:
-            return "This task did not complete successfully. Please share what you see on the page and any exact error text so I can continue checking."
         if running:
             return "This task is still being processed. If it has been waiting too long, share what you see on the page and any exact error text so I can continue checking."
         return _diagnostic_unavailable_reply(language)
+    if failed:
+        if wants_timing and _has_timing_summary(timing):
+            return _format_timing_reply(timing, language, completed=False)
+        return "该任务未成功完成。请补充页面显示内容或完整报错内容，我继续帮您定位。"
     if completed:
         if wants_timing and _has_timing_summary(timing):
             return _format_timing_reply(timing, language)
         return "该任务已完成，结果已回传。如果您仍然看不到结果，请补充页面显示内容或完整报错内容，我继续帮您定位。"
-    if failed:
-        return "该任务未成功完成。请补充页面显示内容或完整报错内容，我继续帮您定位。"
     if running:
         return "该任务仍在处理中。如果等待时间过长，请补充页面显示内容或完整报错内容，我继续帮您定位。"
     return _diagnostic_unavailable_reply(language)
@@ -339,9 +349,15 @@ def _extract_duration(text: str) -> str:
     zh_match = DURATION_ZH_PATTERN.search(text)
     if zh_match:
         return _normalize_duration_parts(zh_match.group(1), zh_match.group(2), "zh-CN")
+    zh_seconds_match = DURATION_ZH_SECONDS_PATTERN.search(text)
+    if zh_seconds_match:
+        return _normalize_duration_seconds(zh_seconds_match.group(1), "zh-CN")
     en_match = DURATION_EN_PATTERN.search(text)
     if en_match:
         return _normalize_duration_parts(en_match.group(1), en_match.group(2), "zh-CN")
+    en_seconds_match = DURATION_EN_SECONDS_PATTERN.search(text)
+    if en_seconds_match:
+        return _normalize_duration_seconds(en_seconds_match.group(1), "zh-CN")
     return ""
 
 
@@ -355,9 +371,17 @@ def _normalize_duration_parts(minutes: str, seconds: str, language: str) -> str:
     return f"{minute_value} 分 {second_value} 秒"
 
 
-def _format_timing_reply(timing: Dict[str, str], language: str) -> str:
+def _normalize_duration_seconds(seconds: str, language: str) -> str:
+    second_value = int(seconds)
     if language == "en":
-        parts = ["This task is complete."]
+        second_unit = "second" if second_value == 1 else "seconds"
+        return f"{second_value} {second_unit}"
+    return f"{second_value} 秒"
+
+
+def _format_timing_reply(timing: Dict[str, str], language: str, completed: bool = True) -> str:
+    if language == "en":
+        parts = ["This task is complete." if completed else "This task did not complete successfully."]
         if timing.get("started_at"):
             parts.append(f"Start time: {timing['started_at']}.")
         if timing.get("completed_at"):
@@ -367,7 +391,7 @@ def _format_timing_reply(timing: Dict[str, str], language: str) -> str:
             parts.append(f"Duration: about {duration}.")
         return " ".join(parts)
 
-    parts = ["该任务已完成。"]
+    parts = ["该任务已完成。" if completed else "该任务未成功完成。"]
     if timing.get("started_at"):
         parts.append(f"开始时间：{timing['started_at']}")
     if timing.get("completed_at"):

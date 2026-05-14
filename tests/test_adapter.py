@@ -695,6 +695,28 @@ def test_task_success_reply_is_reduced_to_customer_safe_summary(adapter_module):
     assert "回调" not in reply
 
 
+def test_task_failure_reply_is_not_misclassified_as_completed(adapter_module):
+    reply = adapter_module._clean_support_reply(
+        "该任务未成功完成。原因：输入或输出可能触发平台规则校验。",
+        original_message="task_3GTIlQ0WzIx8HPLvIRYIkUBY2fdgQuag 什么进度了",
+        language="zh-CN",
+    )
+
+    assert reply.startswith("该任务未成功完成")
+    assert "已完成" not in reply
+
+
+def test_task_failure_time_reply_keeps_safe_timing(adapter_module):
+    reply = adapter_module._clean_support_reply(
+        "该任务未成功完成。开始时间：2026-05-14 10:30:28 UTC+8；结束时间：2026-05-14 10:30:53 UTC+8；耗时约 25 秒。",
+        original_message="task_tDZ7MQk4O6HDDvT58GntywFQCjhBHoS8 这个任务的时间是什么，耗时多久？",
+        language="zh-CN",
+    )
+
+    assert reply == "该任务未成功完成。开始时间：2026-05-14 10:30:28；完成时间：2026-05-14 10:30:53；耗时约 25 秒。"
+    assert "UTC+8" not in reply
+
+
 def test_task_completion_time_reply_keeps_only_customer_safe_timing(adapter_module):
     reply = adapter_module._clean_support_reply(
         (
