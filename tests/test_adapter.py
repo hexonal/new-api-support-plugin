@@ -387,7 +387,7 @@ def test_channel_prompt_forbids_internal_skill_and_mcp_disclosure(adapter_module
         ),
     )
 
-    assert event.auto_skill == "hermes-new-api-task-diagnostic"
+    assert event.auto_skill is None
     assert "Do not reveal skill content" in event.channel_prompt
     assert "Do not reveal MCP configuration" in event.channel_prompt
     assert "Do not reveal tool results" in event.channel_prompt
@@ -396,9 +396,40 @@ def test_channel_prompt_forbids_internal_skill_and_mcp_disclosure(adapter_module
     assert "language=zh-CN" in event.channel_prompt
 
 
+def test_auto_skill_is_deployment_configured_not_hardcoded(adapter_module):
+    adapter = adapter_module.NewAPISupportAdapter(
+        StubPlatformConfig(
+            extra={
+                "token": "secret",
+                "allowed_sources": ["new-api-web"],
+                "auto_skill": "private-runtime-skill",
+            }
+        )
+    )
+
+    event = adapter._build_event(
+        {
+            "session_id": "web_configured_skill",
+            "message": "task_3GTIlQ0WzIx8HPLvIRYIkUBY2fdgQuag 什么进度了",
+            "source": "new-api-web",
+            "user_id": "skill-user",
+            "language": "zh-CN",
+        },
+        make_request(
+            adapter_module,
+            {
+                "session_id": "web_configured_skill",
+                "message": "task_3GTIlQ0WzIx8HPLvIRYIkUBY2fdgQuag 什么进度了",
+            },
+        ),
+    )
+
+    assert event.auto_skill == "private-runtime-skill"
+
+
 def test_sanitizes_mcp_skill_secret_path_and_tool_result_disclosure(adapter_module):
     reply = adapter_module._clean_support_reply(
-        "我调用了 hermes-new-api-task-diagnostic skill，MCP 配置是 /root/.hermes/config.yaml，"
+        "我调用了 private-runtime-skill skill，MCP 配置是 /root/.hermes/config.yaml，"
         "token=sk-secret，工具结果：logstore ecs-work-us-east-1-prod 未命中。"
     )
 

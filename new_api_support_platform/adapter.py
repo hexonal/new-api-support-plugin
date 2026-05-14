@@ -37,7 +37,6 @@ DEFAULT_REQUEST_TIMEOUT_SECONDS = 180
 DEFAULT_REQUIRE_USER_ID = True
 DEFAULT_REPLY_TTL_SECONDS = 21600
 DEFAULT_MAX_REPLY_RECORDS = 2048
-TASK_DIAGNOSTIC_SKILL = "hermes-new-api-task-diagnostic"
 USER_ID_FIELDS = ("user_id", "visitor_id", "anonymous_id", "client_id")
 SUPPORT_CHANNEL_PROMPT = """\
 This chat comes from a website support widget.
@@ -58,7 +57,7 @@ Boundary rules:
 Support workflow:
 - For API failures, ask for the minimum useful evidence: curl, request_id, task_id, model, endpoint, timestamp, and the exact error body.
 - If the user already provided a task_id, request_id, curl, or exact error text, use available read-only diagnostics before asking for more information. Do not ask the user to repeat that identifier.
-- For task_id status, completion-time, or duration questions, use the New API task diagnostic workflow first: query the configured read-only MCP sources in order until the task is found or all sources are exhausted. Do not stop after a single source misses, and do not start by listing projects/workspaces or guessing environments.
+- For task_id status, completion-time, or duration questions, use the New API task diagnostic workflow first: query only the read-only MCP sources explicitly configured for this platform, in the order documented by that workflow, until the task is found or all sources are exhausted. Do not stop after a single source misses. Do not invent database, project, logstore, workspace, or collection names.
 - Do not invent backend query results. If diagnostics are unavailable, fail, or evidence is still insufficient, give a customer-safe status and ask only for missing public fields before claiming a root cause.
 - For billing, routing, quota, token, or permission issues, separate confirmed facts from the next diagnostic step.
 """
@@ -402,15 +401,13 @@ def _queued_reply(language: str = "zh-CN") -> str:
     return "我已收到，正在定位，请稍等。"
 
 
-def _skills_for_message(configured_skill: Any, message: Any) -> Any:
+def _skills_for_message(configured_skill: Any) -> Any:
     skills: list[str] = []
     if isinstance(configured_skill, str):
         if configured_skill.strip():
             skills.append(configured_skill.strip())
     elif isinstance(configured_skill, (list, tuple, set)):
         skills.extend(str(item).strip() for item in configured_skill if str(item).strip())
-    if _contains_tracking_identifier(message) and TASK_DIAGNOSTIC_SKILL not in skills:
-        skills.append(TASK_DIAGNOSTIC_SKILL)
     if not skills:
         return None
     if len(skills) == 1:
@@ -854,7 +851,7 @@ class NewAPISupportAdapter(BasePlatformAdapter):
             source=source,
             raw_message=payload,
             message_id=message_id,
-            auto_skill=_skills_for_message(self.auto_skill, payload.get("message")),
+            auto_skill=_skills_for_message(self.auto_skill),
             channel_prompt=self._channel_prompt(payload),
         )
 

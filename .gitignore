@@ -11,3 +11,6 @@ build/
 *.egg-info/
 .coverage
 htmlcov/
+
+# Runtime-only Hermes skills are installed on the server, not published with this plugin.
+skills/

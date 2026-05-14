@@ -80,7 +80,10 @@ NEW_API_SUPPORT_REQUIRE_USER_ID=true
 
 Use `NEW_API_SUPPORT_ALLOWED_USERS` instead of `NEW_API_SUPPORT_ALLOW_ALL_USERS=true` if the backend sends a fixed small set of user identities. In the web-support deployment, the bearer token is the primary boundary and Hermes user auth is usually set to allow authenticated widget traffic.
 
-`NEW_API_SUPPORT_AUTO_SKILL` is optional. Keep it unset for a generic bridge, or set it in the deployment environment when this endpoint should always load a specific business skill.
+`NEW_API_SUPPORT_AUTO_SKILL` is optional. Keep it unset for a generic bridge, or
+set it in the deployment environment when this endpoint should load a private
+runtime skill. Runtime skill definitions are deployment assets and should not be
+published with this plugin repository.
 
 `NEW_API_SUPPORT_REQUIRE_USER_ID` defaults to `true`. Keep it enabled for web
 support deployments so multi-user traffic cannot collapse into one shared
