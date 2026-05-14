@@ -105,6 +105,11 @@ class StubWeb:
         return StubWeb.Response(data, status=status)
 
 
+class StubMatchInfo(dict):
+    def get(self, key, default=None):
+        return super().get(key, default)
+
+
 def install_gateway_stubs(monkeypatch):
     gateway_mod = types.ModuleType("gateway")
     gateway_config_mod = types.ModuleType("gateway.config")
@@ -150,6 +155,17 @@ def make_request(adapter_module, payload, *, token="secret", method="POST", head
 
         async def json(self):
             return payload
+
+    return Request()
+
+
+def make_reply_request(message_id, *, token="secret", headers=_DEFAULT_HEADERS):
+    class Request:
+        def __init__(self):
+            self.method = "GET"
+            self.headers = {"Authorization": f"Bearer {token}"} if headers is _DEFAULT_HEADERS else headers
+            self.content_length = 0
+            self.match_info = StubMatchInfo({"message_id": message_id})
 
     return Request()
 
@@ -234,8 +250,23 @@ async def _test_builds_message_event_and_returns_agent_reply(adapter_module):
     )
 
     body = json.loads(response.text)
-    assert response.status == 200
-    assert body == {"session_id": "web_abc", "reply": "请把 request_id 发我，我来查。"}
+    assert response.status == 202
+    assert body["session_id"] == "web_abc"
+    assert body["status"] == "queued"
+    assert body["reply"] == "我已收到，正在定位，请稍等。"
+    message_id = body["message_id"]
+
+    for _ in range(50):
+        reply_response = await adapter.handle_reply_request(make_reply_request(message_id))
+        reply_body = json.loads(reply_response.text)
+        if reply_body.get("status") == "completed":
+            break
+        await asyncio.sleep(0.01)
+    else:
+        raise AssertionError("reply did not complete")
+
+    assert reply_response.status == 200
+    assert reply_body["reply"] == "请把 request_id 发我，我来查。"
     event = captured["event"]
     assert event.text == "接口 403 怎么办？"
     assert event.auto_skill is None
@@ -279,7 +310,16 @@ async def _test_returns_handler_reply_verbatim(adapter_module):
         )
     )
 
-    assert json.loads(response.text)["reply"] == "raw handler reply"
+    body = json.loads(response.text)
+    for _ in range(50):
+        reply_response = await adapter.handle_reply_request(make_reply_request(body["message_id"]))
+        reply_body = json.loads(reply_response.text)
+        if reply_body.get("status") == "completed":
+            break
+        await asyncio.sleep(0.01)
+    else:
+        raise AssertionError("reply did not complete")
+    assert reply_body["reply"] == "raw handler reply"
 
 
 def test_returns_handler_reply_verbatim(adapter_module):
@@ -308,7 +348,14 @@ async def _test_sanitizes_private_assistant_terms(adapter_module):
         )
     )
 
-    reply = json.loads(response.text)["reply"]
+    body = json.loads(response.text)
+    for _ in range(50):
+        reply_response = await adapter.handle_reply_request(make_reply_request(body["message_id"]))
+        reply_body = json.loads(reply_response.text)
+        if reply_body.get("status") == "completed":
+            break
+        await asyncio.sleep(0.01)
+    reply = reply_body["reply"]
     assert "Feishu bot" not in reply
     assert "personal assistant" not in reply
     assert reply == "I am a support agent and support agent. Please provide request_id."
@@ -449,6 +496,134 @@ def test_internal_details_requests_are_blocked_before_handler(adapter_module):
         asyncio.run(_assert_internal_details_request_is_blocked_before_handler(adapter_module, message))
 
 
+async def _test_chat_request_returns_queued_before_slow_handler_finishes(adapter_module):
+    adapter = adapter_module.NewAPISupportAdapter(
+        StubPlatformConfig(extra={"token": "secret", "allowed_sources": ["new-api-web"]})
+    )
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def handler(_event):
+        started.set()
+        await release.wait()
+        return "当前状态：已完成。慢诊断完成。"
+
+    adapter.set_message_handler(handler)
+    response = await asyncio.wait_for(
+        adapter.handle_chat_request(
+            make_request(
+                adapter_module,
+                {
+                    "session_id": "web_async",
+                    "message": "task_3GTIlQ0WzIx8HPLvIRYIkUBY2fdgQuag 这个任务完成了吗？",
+                    "source": "new-api-web",
+                    "user_id": "async-user",
+                },
+            )
+        ),
+        timeout=0.2,
+    )
+
+    body = json.loads(response.text)
+    assert response.status == 202
+    assert body["status"] == "queued"
+    assert body["reply"] == "我已收到，正在定位，请稍等。"
+    assert body["message_id"]
+    await started.wait()
+
+    pending_response = await adapter.handle_reply_request(make_reply_request(body["message_id"]))
+    pending_body = json.loads(pending_response.text)
+    assert pending_response.status == 200
+    assert pending_body["status"] == "processing"
+    assert "reply" not in pending_body
+
+    release.set()
+    for _ in range(50):
+        completed_response = await adapter.handle_reply_request(make_reply_request(body["message_id"]))
+        completed_body = json.loads(completed_response.text)
+        if completed_body.get("status") == "completed":
+            break
+        await asyncio.sleep(0.01)
+    else:
+        raise AssertionError("async reply did not complete")
+
+    assert completed_body["reply"] == "该任务已完成，结果已回传。如果您仍然看不到结果，请补充页面显示内容或完整报错内容，我继续帮您定位。"
+
+
+def test_chat_request_returns_queued_before_slow_handler_finishes(adapter_module):
+    asyncio.run(_test_chat_request_returns_queued_before_slow_handler_finishes(adapter_module))
+
+
+async def _test_async_background_processing_stays_serialized_per_conversation(adapter_module):
+    adapter = adapter_module.NewAPISupportAdapter(
+        StubPlatformConfig(extra={"token": "secret", "allowed_sources": ["new-api-web"]})
+    )
+    order = []
+    first_entered = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async def handler(event):
+        order.append(("start", event.text))
+        if event.text == "first":
+            first_entered.set()
+            await release_first.wait()
+        order.append(("end", event.text))
+        return event.text
+
+    adapter.set_message_handler(handler)
+    first_response = await adapter.handle_chat_request(
+        make_request(
+            adapter_module,
+            {
+                "session_id": "web_async_serial",
+                "message": "first",
+                "source": "new-api-web",
+                "user_id": "serial-user",
+            },
+        )
+    )
+    await first_entered.wait()
+    second_response = await adapter.handle_chat_request(
+        make_request(
+            adapter_module,
+            {
+                "session_id": "web_async_serial",
+                "message": "second",
+                "source": "new-api-web",
+                "user_id": "serial-user",
+            },
+        )
+    )
+    await asyncio.sleep(0.05)
+    assert first_response.status == 202
+    assert second_response.status == 202
+    assert order == [("start", "first")]
+
+    release_first.set()
+    first_body = json.loads(first_response.text)
+    second_body = json.loads(second_response.text)
+    for message_id in (first_body["message_id"], second_body["message_id"]):
+        for _ in range(50):
+            reply_response = await adapter.handle_reply_request(make_reply_request(message_id))
+            reply_body = json.loads(reply_response.text)
+            if reply_body.get("status") == "completed":
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError(f"{message_id} did not complete")
+
+    assert order == [
+        ("start", "first"),
+        ("end", "first"),
+        ("start", "second"),
+        ("end", "second"),
+    ]
+
+
+def test_async_background_processing_stays_serialized_per_conversation(adapter_module):
+    asyncio.run(_test_async_background_processing_stays_serialized_per_conversation(adapter_module))
+
+
 def test_task_lookup_internal_failure_does_not_ask_for_duplicate_task_id(adapter_module):
     reply = adapter_module._clean_support_reply(
         "Tool mcp_nexus_guonei_mcp_find_one_document returned error: not authorized. "
@@ -566,7 +741,16 @@ async def _test_accepts_alternate_user_id_fields(adapter_module):
         )
     )
 
-    assert response.status == 200
+    body = json.loads(response.text)
+    for _ in range(50):
+        reply_response = await adapter.handle_reply_request(make_reply_request(body["message_id"]))
+        reply_body = json.loads(reply_response.text)
+        if reply_body.get("status") == "completed":
+            break
+        await asyncio.sleep(0.01)
+    else:
+        raise AssertionError("reply did not complete")
+    assert response.status == 202
     assert captured["event"].source.chat_id == "new-api-web:user:visitor_42:session:web_abc"
     assert captured["event"].source.user_id == "new-api-web:visitor_42"
 
@@ -598,7 +782,16 @@ async def _test_same_session_id_is_isolated_by_user_id(adapter_module):
                 },
             )
         )
-        assert response.status == 200
+        body = json.loads(response.text)
+        for _ in range(50):
+            reply_response = await adapter.handle_reply_request(make_reply_request(body["message_id"]))
+            reply_body = json.loads(reply_response.text)
+            if reply_body.get("status") == "completed":
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("reply did not complete")
+        assert response.status == 202
 
     assert captured[0].source.chat_id == "new-api-web:user:user-a:session:web_shared"
     assert captured[1].source.chat_id == "new-api-web:user:user-b:session:web_shared"
@@ -609,85 +802,51 @@ def test_same_session_id_is_isolated_by_user_id(adapter_module):
     asyncio.run(_test_same_session_id_is_isolated_by_user_id(adapter_module))
 
 
-async def _test_same_conversation_requests_are_serialized(adapter_module):
-    adapter = adapter_module.NewAPISupportAdapter(
-        StubPlatformConfig(
-            extra={
-                "token": "secret",
-                "allowed_sources": ["new-api-web"],
-                "request_timeout_seconds": 5,
-            }
-        )
-    )
-    order = []
-    first_entered = asyncio.Event()
-    release_first = asyncio.Event()
-
-    async def handler(event):
-        order.append(("start", event.text))
-        if event.text == "first":
-            first_entered.set()
-            await release_first.wait()
-        order.append(("end", event.text))
-        return event.text
-
-    adapter.set_message_handler(handler)
-    first = asyncio.create_task(
-        adapter.handle_chat_request(
-            make_request(
-                adapter_module,
-                {
-                    "session_id": "web_serial",
-                    "message": "first",
-                    "source": "new-api-web",
-                    "user_id": "serial-user",
-                },
-            )
-        )
-    )
-    await first_entered.wait()
-    second = asyncio.create_task(
-        adapter.handle_chat_request(
-            make_request(
-                adapter_module,
-                {
-                    "session_id": "web_serial",
-                    "message": "second",
-                    "source": "new-api-web",
-                    "user_id": "serial-user",
-                },
-            )
-        )
-    )
-    await asyncio.sleep(0.05)
-    assert order == [("start", "first")]
-    release_first.set()
-    first_response, second_response = await asyncio.gather(first, second)
-
-    assert first_response.status == 200
-    assert second_response.status == 200
-    assert order == [
-        ("start", "first"),
-        ("end", "first"),
-        ("start", "second"),
-        ("end", "second"),
-    ]
-
-
-def test_same_conversation_requests_are_serialized(adapter_module):
-    asyncio.run(_test_same_conversation_requests_are_serialized(adapter_module))
-
-
-async def _test_send_collects_fallback_reply(adapter_module):
+async def _test_send_completes_async_reply(adapter_module):
     adapter = adapter_module.NewAPISupportAdapter(StubPlatformConfig(extra={"token": "secret"}))
-    pending = asyncio.get_running_loop().create_future()
-    adapter._pending_http_replies["web_1"] = pending
+    adapter._reply_records["msg_1"] = {
+        "message_id": "msg_1",
+        "session_id": "web_1",
+        "chat_id": "web_1",
+        "status": "processing",
+        "reply": "",
+        "error": "",
+        "language": "zh-CN",
+        "original_message": "hi",
+    }
+    adapter._chat_to_message["web_1"] = "msg_1"
 
-    result = await adapter.send("web_1", "fallback reply")
+    result = await adapter.send("web_1", "fallback reply", metadata={"notify": True})
 
     assert result.success is True
-    assert pending.result() == "fallback reply"
+    assert adapter._reply_records["msg_1"]["status"] == "completed"
+    assert adapter._reply_records["msg_1"]["reply"] == "fallback reply"
 
 
-def test_send_collects_fallback_reply(adapter_module):
-    asyncio.run(_test_send_collects_fallback_reply(adapter_module))
+def test_send_completes_async_reply(adapter_module):
+    asyncio.run(_test_send_completes_async_reply(adapter_module))
+
+
+async def _test_progress_send_does_not_complete_async_reply(adapter_module):
+    adapter = adapter_module.NewAPISupportAdapter(StubPlatformConfig(extra={"token": "secret"}))
+    adapter._reply_records["msg_1"] = {
+        "message_id": "msg_1",
+        "session_id": "web_1",
+        "chat_id": "web_1",
+        "status": "processing",
+        "reply": "",
+        "error": "",
+        "language": "zh-CN",
+        "original_message": "hi",
+    }
+    adapter._chat_to_message["web_1"] = "msg_1"
+
+    result = await adapter.send("web_1", "内部工具进度", metadata={"thread_id": "web_1"})
+
+    assert result.success is True
+    assert adapter._reply_records["msg_1"]["status"] == "processing"
+    assert adapter._reply_records["msg_1"]["reply"] == ""
+
+
+def test_progress_send_does_not_complete_async_reply(adapter_module):
+    asyncio.run(_test_progress_send_does_not_complete_async_reply(adapter_module))

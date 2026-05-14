@@ -5,6 +5,7 @@ import hmac
 import logging
 import os
 import re
+import time
 import uuid
 from typing import Any, Dict, Iterable, Optional
 
@@ -34,6 +35,8 @@ DEFAULT_MAX_BODY_BYTES = 65536
 DEFAULT_MAX_MESSAGE_CHARS = 4000
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 180
 DEFAULT_REQUIRE_USER_ID = True
+DEFAULT_REPLY_TTL_SECONDS = 21600
+DEFAULT_MAX_REPLY_RECORDS = 2048
 TASK_DIAGNOSTIC_SKILL = "hermes-new-api-task-diagnostic"
 USER_ID_FIELDS = ("user_id", "visitor_id", "anonymous_id", "client_id")
 SUPPORT_CHANNEL_PROMPT = """\
@@ -393,6 +396,12 @@ def _diagnostic_unavailable_reply(language: str = "zh-CN") -> str:
     return "当前还无法确认该任务的最终状态。请补充请求时间、endpoint、模型和完整报错内容，我继续帮您定位。"
 
 
+def _queued_reply(language: str = "zh-CN") -> str:
+    if language == "en":
+        return "I've received your question and am checking it now. Please wait a moment."
+    return "我已收到，正在定位，请稍等。"
+
+
 def _skills_for_message(configured_skill: Any, message: Any) -> Any:
     skills: list[str] = []
     if isinstance(configured_skill, str):
@@ -443,6 +452,8 @@ def _env_enablement() -> Optional[dict]:
             DEFAULT_REQUEST_TIMEOUT_SECONDS,
         ),
         "require_user_id": _truthy(os.getenv("NEW_API_SUPPORT_REQUIRE_USER_ID"), DEFAULT_REQUIRE_USER_ID),
+        "reply_ttl_seconds": _int_value(os.getenv("NEW_API_SUPPORT_REPLY_TTL_SECONDS"), DEFAULT_REPLY_TTL_SECONDS),
+        "max_reply_records": _int_value(os.getenv("NEW_API_SUPPORT_MAX_REPLY_RECORDS"), DEFAULT_MAX_REPLY_RECORDS),
     }
 
 
@@ -478,6 +489,7 @@ class NewAPISupportAdapter(BasePlatformAdapter):
         self.path = str(_env_first("NEW_API_SUPPORT_PATH", extra, "path", DEFAULT_PATH) or DEFAULT_PATH)
         if not self.path.startswith("/"):
             self.path = "/" + self.path
+        self.reply_path = self._derive_reply_path(self.path)
         self.token = str(_env_first("NEW_API_SUPPORT_TOKEN", extra, "token", "") or "")
         self.require_token = _truthy(
             _env_first("NEW_API_SUPPORT_REQUIRE_TOKEN", extra, "require_token", True),
@@ -514,12 +526,24 @@ class NewAPISupportAdapter(BasePlatformAdapter):
             _env_first("NEW_API_SUPPORT_REQUIRE_USER_ID", extra, "require_user_id", DEFAULT_REQUIRE_USER_ID),
             DEFAULT_REQUIRE_USER_ID,
         )
+        self.reply_ttl_seconds = _int_value(
+            _env_first("NEW_API_SUPPORT_REPLY_TTL_SECONDS", extra, "reply_ttl_seconds", DEFAULT_REPLY_TTL_SECONDS),
+            DEFAULT_REPLY_TTL_SECONDS,
+        )
+        self.max_reply_records = _int_value(
+            _env_first("NEW_API_SUPPORT_MAX_REPLY_RECORDS", extra, "max_reply_records", DEFAULT_MAX_REPLY_RECORDS),
+            DEFAULT_MAX_REPLY_RECORDS,
+        )
 
         self._app: Any = None
         self._runner: Any = None
         self._site: Any = None
         self._pending_http_replies: Dict[str, asyncio.Future] = {}
         self._conversation_locks: Dict[str, asyncio.Lock] = {}
+        self._reply_records: Dict[str, Dict[str, Any]] = {}
+        self._chat_to_message: Dict[str, str] = {}
+        self._active_chat_messages: Dict[str, str] = {}
+        self._background_tasks: set[asyncio.Task] = set()
 
     @property
     def name(self) -> str:
@@ -536,6 +560,7 @@ class NewAPISupportAdapter(BasePlatformAdapter):
         self._app = web.Application(client_max_size=self.max_body_bytes)
         self._app.router.add_get("/health", self.handle_health)
         self._app.router.add_post(self.path, self.handle_chat_request)
+        self._app.router.add_get(f"{self.reply_path}/{{message_id}}", self.handle_reply_request)
         self._runner = web.AppRunner(self._app)
         await self._runner.setup()
         self._site = web.TCPSite(self._runner, self.host, self.port)
@@ -549,6 +574,11 @@ class NewAPISupportAdapter(BasePlatformAdapter):
             if not future.done():
                 future.cancel()
         self._pending_http_replies.clear()
+        for task in list(self._background_tasks):
+            task.cancel()
+        if self._background_tasks:
+            await asyncio.gather(*self._background_tasks, return_exceptions=True)
+        self._background_tasks.clear()
         if self._runner is not None:
             await self._runner.cleanup()
         self._runner = None
@@ -562,6 +592,7 @@ class NewAPISupportAdapter(BasePlatformAdapter):
                 "status": "ok",
                 "platform": PLATFORM_NAME,
                 "path": self.path,
+                "reply_path": f"{self.reply_path}/{{message_id}}",
             }
         )
 
@@ -592,51 +623,101 @@ class NewAPISupportAdapter(BasePlatformAdapter):
             return self._json({"error": "handler_not_ready"}, status=503)
 
         event = self._build_event(payload, request)
-        try:
-            reply = await asyncio.wait_for(
-                self._call_handler_serialized(event),
-                timeout=self.request_timeout_seconds,
-            )
-        except asyncio.TimeoutError:
-            return self._json({"error": "agent_timeout"}, status=504)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            logger.exception("New API Support: handler failed")
-            return self._json({"error": "agent_error", "message": str(exc)}, status=500)
+        record = self._create_reply_record(event, payload)
+        task = asyncio.create_task(self._process_event_background(event, record["message_id"]))
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
         return self._json(
             {
                 "session_id": payload["session_id"],
-                "reply": _clean_support_reply(
-                    reply,
-                    original_message=payload.get("message"),
-                    language=payload.get("language"),
-                ),
-            }
+                "message_id": record["message_id"],
+                "status": "queued",
+                "reply": _queued_reply(record["language"]),
+                "poll_path": f"{self.reply_path}/{record['message_id']}",
+            },
+            status=202,
         )
 
-    async def _call_handler_serialized(self, event: MessageEvent) -> str:
+    async def handle_reply_request(self, request: Any) -> Any:
+        if request.method != "GET":
+            return self._json({"error": "method_not_allowed"}, status=405)
+        auth_error = self._check_auth(request)
+        if auth_error is not None:
+            return auth_error
+        message_id = str(getattr(request, "match_info", {}).get("message_id", "")).strip()
+        if not message_id or re.search(r"[^A-Za-z0-9_.:@-]", message_id):
+            return self._json({"error": "invalid_message_id"}, status=400)
+        self._prune_reply_records()
+        record = self._reply_records.get(message_id)
+        if record is None:
+            return self._json({"error": "reply_not_found"}, status=404)
+
+        status = str(record.get("status") or "processing")
+        body: Dict[str, Any] = {
+            "session_id": record.get("session_id", ""),
+            "message_id": message_id,
+            "status": status,
+        }
+        if status == "completed":
+            body["reply"] = record.get("reply", "")
+        elif status == "failed":
+            body["reply"] = _diagnostic_unavailable_reply(str(record.get("language") or "zh-CN"))
+        return self._json(body)
+
+    async def _process_event_background(self, event: MessageEvent, message_id: str) -> None:
+        record = self._reply_records.get(message_id)
+        if record is not None:
+            record["status"] = "processing"
+            record["updated_at"] = time.time()
+        try:
+            reply = await asyncio.wait_for(
+                self._call_handler_serialized(event, message_id),
+                timeout=self.request_timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            self._fail_reply(message_id, "agent_timeout")
+        except asyncio.CancelledError:
+            self._fail_reply(message_id, "cancelled")
+            raise
+        except Exception as exc:
+            logger.exception("New API Support: background handler failed")
+            self._fail_reply(message_id, str(exc))
+        else:
+            self._complete_reply(message_id, reply)
+
+    async def _call_handler_serialized(self, event: MessageEvent, message_id: Optional[str] = None) -> str:
         conversation_key = str(event.source.chat_id)
         lock = self._conversation_locks.get(conversation_key)
         if lock is None:
             lock = asyncio.Lock()
             self._conversation_locks[conversation_key] = lock
         async with lock:
-            return await self._call_handler(event)
+            if message_id:
+                self._active_chat_messages[conversation_key] = message_id
+            try:
+                return await self._call_handler(event, message_id=message_id)
+            finally:
+                if message_id and self._active_chat_messages.get(conversation_key) == message_id:
+                    self._active_chat_messages.pop(conversation_key, None)
 
-    async def _call_handler(self, event: MessageEvent) -> str:
-        response = await self._message_handler(event)
-        if response is not None:
-            return str(response)
-
+    async def _call_handler(self, event: MessageEvent, message_id: Optional[str] = None) -> str:
         loop = asyncio.get_running_loop()
         future = loop.create_future()
-        self._pending_http_replies[event.source.chat_id] = future
+        chat_id = str(event.source.chat_id)
+        self._pending_http_replies[chat_id] = future
         try:
+            response = await self._message_handler(event)
+            if response is not None:
+                return str(response)
+            if message_id:
+                record = self._reply_records.get(message_id)
+                if record is not None and record.get("status") == "completed":
+                    return str(record.get("reply") or "")
             return await asyncio.wait_for(future, timeout=self.request_timeout_seconds)
         finally:
-            self._pending_http_replies.pop(event.source.chat_id, None)
+            if self._pending_http_replies.get(chat_id) is future:
+                self._pending_http_replies.pop(chat_id, None)
 
     def _validate_payload(self, payload: Dict[str, Any]) -> Optional[Any]:
         session_id = str(payload.get("session_id") or "").strip()
@@ -671,6 +752,85 @@ class NewAPISupportAdapter(BasePlatformAdapter):
                 ),
             }
         )
+
+    def _create_reply_record(self, event: MessageEvent, payload: Dict[str, Any]) -> Dict[str, Any]:
+        self._prune_reply_records()
+        message_id = str(event.message_id or uuid.uuid4())
+        language = _preferred_language(payload.get("language"), payload.get("message"))
+        record = {
+            "message_id": message_id,
+            "session_id": str(payload["session_id"]),
+            "chat_id": str(event.source.chat_id),
+            "status": "queued",
+            "reply": "",
+            "error": "",
+            "language": language,
+            "original_message": payload.get("message"),
+            "created_at": time.time(),
+            "updated_at": time.time(),
+        }
+        self._reply_records[message_id] = record
+        self._chat_to_message[str(event.source.chat_id)] = message_id
+        return record
+
+    def _complete_reply(self, message_id: str, reply: Any) -> None:
+        record = self._reply_records.get(message_id)
+        if record is None or record.get("status") == "completed":
+            return
+        record["reply"] = _clean_support_reply(
+            reply,
+            original_message=record.get("original_message"),
+            language=record.get("language"),
+        )
+        record["status"] = "completed"
+        record["updated_at"] = time.time()
+
+    def _fail_reply(self, message_id: str, error: str) -> None:
+        record = self._reply_records.get(message_id)
+        if record is None:
+            return
+        if record.get("status") == "completed":
+            return
+        record["status"] = "failed"
+        record["error"] = str(error)
+        record["updated_at"] = time.time()
+
+    def _message_id_for_chat(self, chat_id: str) -> Optional[str]:
+        return self._active_chat_messages.get(str(chat_id)) or self._chat_to_message.get(str(chat_id))
+
+    @staticmethod
+    def _is_final_send(metadata: Optional[Dict[str, Any]]) -> bool:
+        if not isinstance(metadata, dict):
+            return False
+        return metadata.get("notify") is True or metadata.get("new_api_support_final") is True
+
+    def _prune_reply_records(self) -> None:
+        if not self._reply_records:
+            return
+        now = time.time()
+        expired = [
+            message_id
+            for message_id, record in self._reply_records.items()
+            if now - float(record.get("updated_at") or record.get("created_at") or now) > self.reply_ttl_seconds
+        ]
+        for message_id in expired:
+            self._reply_records.pop(message_id, None)
+        overflow = len(self._reply_records) - self.max_reply_records
+        if overflow <= 0:
+            return
+        ordered = sorted(
+            self._reply_records.items(),
+            key=lambda item: float(item[1].get("updated_at") or item[1].get("created_at") or 0),
+        )
+        for message_id, _record in ordered[:overflow]:
+            self._reply_records.pop(message_id, None)
+
+    @staticmethod
+    def _derive_reply_path(chat_path: str) -> str:
+        path = str(chat_path or DEFAULT_PATH).rstrip("/") or DEFAULT_PATH
+        if path.endswith("/chat"):
+            return path[: -len("/chat")] + "/reply"
+        return path + "/reply"
 
     def _build_event(self, payload: Dict[str, Any], request: Any) -> MessageEvent:
         source_name = str(payload.get("source") or "new-api-web").strip()
@@ -738,10 +898,14 @@ class NewAPISupportAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
+        message_id = self._message_id_for_chat(str(chat_id))
+        is_final = self._is_final_send(metadata)
+        if message_id and is_final:
+            self._complete_reply(message_id, content)
         future = self._pending_http_replies.get(str(chat_id))
-        if future is not None and not future.done():
+        if is_final and future is not None and not future.done():
             future.set_result(content)
-        return SendResult(success=True, message_id=str(uuid.uuid4()), raw_response={"reply_to": reply_to, "metadata": metadata})
+        return SendResult(success=True, message_id=message_id or str(uuid.uuid4()), raw_response={"reply_to": reply_to, "metadata": metadata})
 
     async def send_typing(self, chat_id: str, metadata: Optional[Dict[str, Any]] = None) -> None:
         return None
